@@ -2,3 +2,16 @@
 name = "utokyo-FEN-EE3901E1-i3"
 version = "0.0.0"
 edition = "2024"
+
+[dependencies]
+color-eyre = "0.6.5"
+cpal = "0.16.0"
+crossterm = "0.29.0"
+dasp = "0.11.0"
+ratatui = "0.29.0"
+rkyv = "0.8.10"
+tokio = "1.45.1"
+tracing = "0.1.41"
+tracing-appender = "0.2.3"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+webrtc = "0.13.0"
