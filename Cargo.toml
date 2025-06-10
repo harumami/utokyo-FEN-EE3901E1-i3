@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 color-eyre = "0.6.5"
 cpal = "0.16.0"
-crossterm = "0.29.0"
 dasp = "0.11.0"
 ratatui = "0.29.0"
 rkyv = "0.8.10"
