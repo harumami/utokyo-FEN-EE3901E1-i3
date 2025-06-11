@@ -1,20 +1,23 @@
+mod defer;
+mod render;
+mod report;
+mod widget;
+
 use {
-    ::color_eyre::{
-        eyre::Result,
-        install as install_eyre,
+    crate::{
+        render::Renderer,
+        report::Result,
     },
-    ::ratatui::crossterm::terminal::enable_raw_mode,
     ::std::{
-        io::stderr,
+        fs::File,
+        io::BufWriter,
         process::ExitCode,
     },
     ::tokio::{
         runtime::Runtime,
         signal::ctrl_c,
-        task::JoinHandle,
     },
     ::tracing::{
-        error,
         level_filters::LevelFilter,
         trace,
     },
@@ -22,9 +25,13 @@ use {
         NonBlocking,
         WorkerGuard,
     },
+    ::tracing_error::ErrorLayer,
     ::tracing_subscriber::{
         filter::EnvFilter,
-        fmt::Layer,
+        fmt::{
+            Layer,
+            format::DefaultFields,
+        },
         layer::SubscriberExt as _,
         registry::Registry,
         util::SubscriberInitExt as _,
@@ -34,30 +41,15 @@ use {
         ice_transport::ice_server::RTCIceServer,
         peer_connection::configuration::RTCConfiguration,
     },
-    ratatui::{
-        Terminal,
-        crossterm::{
-            execute,
-            terminal::{
-                EnterAlternateScreen,
-                LeaveAlternateScreen,
-                disable_raw_mode,
-            },
-        },
-        prelude::CrosstermBackend,
-    },
-    std::io::{
-        StdoutLock,
-        stdout,
-    },
+    ratatui::Frame,
 };
 
 fn main() -> ExitCode {
     match init() {
         Result::Ok(_guard) => match run() {
-            Result::Ok(_handle) => ExitCode::SUCCESS,
+            Result::Ok(()) => ExitCode::SUCCESS,
             Result::Err(error) => {
-                error!(error = &*error);
+                error.report();
                 ExitCode::FAILURE
             },
         },
@@ -69,24 +61,36 @@ fn main() -> ExitCode {
 }
 
 fn init() -> Result<WorkerGuard> {
-    install_eyre()?;
-    let (writer, guard) = NonBlocking::new(stderr());
+    let (writer, guard) = NonBlocking::new(BufWriter::new(File::create("tracing.log")?));
 
     Registry::default()
-        .with(Layer::new().with_writer(writer))
         .with(
             EnvFilter::builder()
+                .with_env_var("TRACING_LOG")
                 .with_default_directive(LevelFilter::INFO.into())
                 .from_env()?,
         )
+        .with(Layer::new().with_writer(writer))
+        .with(ErrorLayer::new(DefaultFields::new()))
         .try_init()?;
 
     Result::Ok(guard)
 }
 
 fn run() -> Result<()> {
-    // let renderer =
+    let mut renderer = Renderer::new()?;
     let handle = Runtime::new()?.spawn(task());
+
+    renderer.terminal().draw(|frame| {
+        if let Result::Err(error) = draw(frame) {
+            error.report();
+        }
+    })?;
+
+    Result::Ok(())
+}
+
+fn draw(frame: &mut Frame<'_>) -> Result<()> {
     Result::Ok(())
 }
 
@@ -106,38 +110,4 @@ async fn task() -> Result<()> {
     ctrl_c().await?;
     connection.close().await?;
     Result::Ok(())
-}
-
-struct Renderer {
-    terminal: Terminal<CrosstermBackend<StdoutLock<'static>>>,
-}
-
-impl Renderer {
-    fn new() -> Result<Self> {
-        let mut renderer = Self {
-            terminal: Terminal::new(CrosstermBackend::new(stdout().lock()))?,
-        };
-
-        enable_raw_mode()?;
-        execute!(renderer.backend_mut(), EnterAlternateScreen)?;
-        Result::Ok(renderer)
-    }
-
-    fn backend_mut(&mut self) -> &mut CrosstermBackend<StdoutLock<'static>> {
-        self.terminal.backend_mut()
-    }
-
-    fn kill(&mut self) -> Result<()> {
-        disable_raw_mode()?;
-        execute!(self.backend_mut(), LeaveAlternateScreen)?;
-        Result::Ok(())
-    }
-}
-
-impl Drop for Renderer {
-    fn drop(&mut self) {
-        if let Result::Err(error) = self.kill() {
-            error!(error = &*error);
-        }
-    }
 }
