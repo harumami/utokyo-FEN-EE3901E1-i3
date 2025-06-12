@@ -1,3 +1,5 @@
 target
+vcpkg_installed
+src/opus.rs
 Cargo.lock
 tracing.log

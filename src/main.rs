@@ -1,4 +1,11 @@
+mod opus;
+
 use {
+    ::iroh::{
+        NodeId,
+        SecretKey,
+    },
+    ::rand::rngs::OsRng,
     ::ratatui::{
         Terminal,
         backend::CrosstermBackend,
@@ -19,22 +26,16 @@ use {
                 enable_raw_mode,
             },
         },
-        layout::Rect,
-        style::{
-            Color,
-            Modifier,
+        layout::{
+            Constraint,
+            Rect,
         },
-        symbols::border::THICK,
-        text::{
-            Line,
-            Span,
-            Text,
-        },
+        style::Color,
         widgets::{
-            Block,
-            Paragraph,
+            Row,
             StatefulWidget,
-            Widget,
+            Table,
+            TableState,
         },
     },
     ::std::{
@@ -50,7 +51,6 @@ use {
             BufWriter,
             stdout,
         },
-        num::Saturating,
         panic::{
             set_hook,
             take_hook,
@@ -171,27 +171,27 @@ fn run() -> Result<()> {
 
     let mut terminal = Terminal::new(CrosstermBackend::new(lock))?;
     trace!(?terminal);
-    let mut counter = Saturating(0);
     let mut exit = false;
+    let mut state = HomeState::new();
 
     while !exit {
         terminal.draw(|frame| {
-            frame.render_stateful_widget(Counter, frame.area(), &mut counter.0);
+            frame.render_stateful_widget(Home, frame.area(), &mut state);
         })?;
 
         if let Event::Key(KeyEvent {
-            code,
+            code: KeyCode::Char(char),
             kind: KeyEventKind::Press,
             ..
         }) = read()?
         {
-            match code {
-                KeyCode::Char('q') => {
+            match char {
+                'q' => {
                     info!("exit loop");
                     exit = true
                 },
-                KeyCode::Left => counter -= 1,
-                KeyCode::Right => counter += 1,
+                'j' => state.table_state.select_next(),
+                'k' => state.table_state.select_previous(),
                 _ => (),
             }
         }
@@ -223,38 +223,56 @@ impl<F: FnOnce() -> Result<()>> Drop for Deferrer<F> {
     }
 }
 
-struct Counter;
+struct Home;
 
-impl StatefulWidget for Counter {
-    type State = u32;
+struct HomeState {
+    mode: Option<Mode>,
+    secret: SecretKey,
+    node_id: Option<NodeId>,
+    table_state: TableState,
+}
 
-    #[instrument(level = "trace", skip(self, buf))]
+impl HomeState {
+    fn new() -> Self {
+        let mut state = Self {
+            mode: Option::None,
+            secret: SecretKey::from_bytes(&Default::default()),
+            node_id: Option::None,
+            table_state: TableState::new().with_selected_cell((0, 1)),
+        };
+
+        state.generate_secret();
+        state
+    }
+
+    fn generate_secret(&mut self) {
+        self.secret = SecretKey::generate(OsRng);
+    }
+}
+
+enum Mode {
+    Host,
+    Join,
+}
+
+impl StatefulWidget for Home {
+    type State = HomeState;
+
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        let title = Line::styled(" Counter App Tutorial ", Modifier::BOLD);
-
-        let instructions = Line::from(vec![
-            Span::raw(" Decrement "),
-            Span::styled("<Left>", (Color::Blue, Modifier::BOLD)),
-            Span::raw(" Increment "),
-            Span::styled("<Right>", (Color::Blue, Modifier::BOLD)),
-            Span::raw(" Quit "),
-            Span::styled("<Q> ", (Color::Blue, Modifier::BOLD)),
-        ]);
-
-        let block = Block::bordered()
-            .title(title.centered())
-            .title_bottom(instructions.centered())
-            .border_set(THICK);
-
-        let counter_text = Text::from(vec![Line::from(vec![
-            Span::raw("Value: "),
-            Span::styled(state.to_string(), Color::Yellow),
-        ])]);
-
-        Paragraph::new(counter_text)
-            .centered()
-            .block(block)
-            .render(area, buf);
+        StatefulWidget::render(
+            Table::new(
+                [
+                    Row::new(["A", "B"]),
+                    Row::new(["C", "D"]),
+                    Row::new(["E", "F"]),
+                ],
+                [1, 2].map(Constraint::Fill),
+            )
+            .cell_highlight_style((Color::White, Color::Black)),
+            area,
+            buf,
+            &mut state.table_state,
+        );
     }
 }
 

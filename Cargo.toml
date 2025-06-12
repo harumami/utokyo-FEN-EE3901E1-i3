@@ -4,9 +4,11 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
+arboard = "3.5.0"
 cpal = "0.16.0"
 dasp = "0.11.0"
 iroh = "0.35.0"
+rand = "0.8.5"
 ratatui = "0.29.0"
 rkyv = "0.8.10"
 tokio = "1.45.1"
@@ -14,3 +16,6 @@ tracing = "0.1.41"
 tracing-appender = "0.2.3"
 tracing-error = "0.2.1"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+
+[build-dependencies]
+bindgen = "0.72.0"
