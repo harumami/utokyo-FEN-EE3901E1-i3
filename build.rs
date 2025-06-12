@@ -35,7 +35,7 @@ fn main() {
     };
 
     builder()
-        .raw_line("#![allow(unused)]")
+        .raw_line("#![allow(dead_code, non_camel_case_types)]")
         .header(format!("vcpkg_installed/{arch}-{os}/include/opus/opus.h"))
         .generate()
         .expect("failed to generate bindgen")
