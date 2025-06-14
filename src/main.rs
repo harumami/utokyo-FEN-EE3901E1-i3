@@ -401,6 +401,8 @@ async fn record(
         }
     }
 
+    send_stream.finish()?;
+    send_stream.stopped().await?;
     Result::Ok(())
 }
 
@@ -649,7 +651,7 @@ impl Resampler {
     }
 
     fn handle_error(error: c_int) -> Result<()> {
-        if error == RESAMPLER_ERR_SUCCESS {
+        if error != RESAMPLER_ERR_SUCCESS {
             let error = unsafe { CStr::from_ptr(speex_resampler_strerror(error)) }.to_str()?;
             bail!("speex error: {error}");
         }
