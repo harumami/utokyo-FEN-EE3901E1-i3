@@ -268,7 +268,7 @@ async fn commute(send_stream: SendStream, recv_stream: RecvStream) -> Result<()>
     trace!(host = ?host.id());
     let sample_rate = 48000;
     let channels = 2;
-    let frame_size = sample_rate as usize * 40 / 1000;
+    let frame_size = sample_rate as usize * 20 / 1000;
     let max_frame_size = sample_rate as usize * 120 / 1000;
     let max_packet_size = 4000;
     let quality = 7;
@@ -496,7 +496,7 @@ async fn play(
 
     trace!(stereo);
     let raw_sample_rate = config.sample_rate().0;
-    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as usize / 10));
+    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as _));
     let buffer1 = buffer0.clone();
     debug!("build output stream");
 
@@ -539,7 +539,10 @@ async fn play(
         decoder.decode(max_frame_size)?;
         buffer2.extend_from_slice(decoder.output());
         let (n, buffer3) = resampler.resample(&buffer2)?;
+        debug!(buffer2_len = buffer2.len());
         buffer2.drain(0..n as usize);
+        debug!(buffer2_len = buffer2.len());
+        debug!(used = buffer1.used());
         buffer1.extend(buffer3.chunks(2).map(|frame| [frame[0], frame[1]]));
         debug!(used = buffer1.used());
     }
