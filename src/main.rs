@@ -322,6 +322,7 @@ async fn record(
     quality: u32,
     exit: Arc<RwLock<bool>>,
 ) -> Result<()> {
+    debug!("get input device");
     let device = host.default_input_device().ok_or_eyre("no input device")?;
     trace!(device = device.name()?);
     let mut configs = device.supported_input_configs()?.collect::<Vec<_>>();
@@ -350,9 +351,11 @@ async fn record(
         _ => bail!("no input configuration which is stereo or mono"),
     };
 
+    trace!(stereo);
     let raw_sample_rate = config.sample_rate().0;
     let buffer0 = Arc::new(RingBuffer::new(16 * frame_size));
     let buffer1 = buffer0.clone();
+    debug!("build input stream");
 
     let input_stream = spawn_blocking(move || {
         device.build_input_stream_raw(
@@ -382,8 +385,9 @@ async fn record(
     let mut buffer2 = Vec::new();
     let mut resampler = Resampler::new(channels, raw_sample_rate, sample_rate, quality)?;
     let mut encoder = Encoder::new(sample_rate, channels)?;
+    debug!("start record loop");
 
-    while *exit.read().await {
+    while !*exit.read().await {
         buffer1.wait().await;
         buffer2.extend(buffer1.drain().flatten());
         let (n, buffer3) = resampler.resample(&buffer2)?;
@@ -394,6 +398,7 @@ async fn record(
             encoder.encode(frame_size, max_packet_size)?;
 
             if !encoder.output.is_empty() {
+                debug!("send opus packet");
                 let len = (encoder.output().len() as u32).to_le_bytes();
                 send_stream.write_all(&len).await?;
                 send_stream.write_all(encoder.output()).await?;
@@ -401,6 +406,7 @@ async fn record(
         }
     }
 
+    debug!("exit record loop");
     send_stream.finish()?;
     send_stream.stopped().await?;
     Result::Ok(())
@@ -446,6 +452,8 @@ async fn play(
     quality: u32,
     exit: Arc<RwLock<bool>>,
 ) -> Result<()> {
+    debug!("get output device");
+
     let device = host
         .default_output_device()
         .ok_or_eyre("no output device")?;
@@ -477,9 +485,11 @@ async fn play(
         _ => bail!("no output configuration which is stereo or mono"),
     };
 
+    trace!(stereo);
     let raw_sample_rate = config.sample_rate().0;
     let buffer0 = Arc::new(RingBuffer::new(16 * max_frame_size));
     let buffer1 = buffer0.clone();
+    debug!("build output stream");
 
     let output_stream = spawn_blocking(move || {
         device.build_output_stream_raw(
@@ -509,8 +519,10 @@ async fn play(
     let mut buffer2 = Vec::new();
     let mut decoder = Decoder::new(sample_rate, channels)?;
     let mut resampler = Resampler::new(channels, sample_rate, raw_sample_rate, quality)?;
+    debug!("start play loop");
 
-    while *exit.read().await {
+    while !*exit.read().await {
+        debug!("receive opus packed");
         let mut buffer = [0; 4];
         recv_stream.read_exact(&mut buffer).await?;
         decoder.input().resize(u32::from_le_bytes(buffer) as _, 0);
@@ -522,6 +534,7 @@ async fn play(
         buffer1.extend(buffer3.chunks(2).map(|frame| [frame[0], frame[1]]));
     }
 
+    debug!("exit play loop");
     Result::Ok(())
 }
 
