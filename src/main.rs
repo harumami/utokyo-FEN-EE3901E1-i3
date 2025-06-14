@@ -268,7 +268,7 @@ async fn commute(send_stream: SendStream, recv_stream: RecvStream) -> Result<()>
     trace!(host = ?host.id());
     let sample_rate = 48000;
     let channels = 2;
-    let frame_size = sample_rate as usize * 20 / 1000;
+    let frame_size = sample_rate as usize * 40 / 1000;
     let max_frame_size = sample_rate as usize * 120 / 1000;
     let max_packet_size = 4000;
     let quality = 7;
@@ -336,6 +336,7 @@ async fn record(
             },
             config.max_sample_rate(),
             config.sample_format().sample_size(),
+            config.sample_format().is_float(),
         ))
     });
 
@@ -476,6 +477,7 @@ async fn play(
             },
             config.max_sample_rate(),
             config.sample_format().sample_size(),
+            config.sample_format().is_float(),
         ))
     });
 
