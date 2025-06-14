@@ -123,8 +123,6 @@ use {
         registry::Registry,
         util::SubscriberInitExt as _,
     },
-    std::time::Duration,
-    tokio::time::sleep,
 };
 
 #[tokio::main]
@@ -397,7 +395,7 @@ async fn record(
         debug!(used = buffer1.used());
         buffer2.extend(buffer1.drain().flatten());
         let (n, buffer3) = resampler.resample(&buffer2)?;
-        buffer2.drain(0..(n * channels) as usize);
+        buffer2.drain(0..(n * channels) as _);
         encoder.input().extend(buffer3);
 
         while encoder.ready(frame_size) {
@@ -500,7 +498,7 @@ async fn play(
     trace!(stereo);
     let raw_sample_rate = config.sample_rate().0;
     trace!(raw_sample_rate);
-    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as usize / 10));
+    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as usize / 50));
     let buffer1 = buffer0.clone();
     debug!("build output stream");
 
@@ -547,12 +545,7 @@ async fn play(
         decoder.decode(max_frame_size)?;
         buffer2.extend_from_slice(decoder.output());
         let (n, buffer3) = resampler.resample(&buffer2)?;
-        buffer2.drain(0..n as usize);
-
-        while buffer1.used() > 0.8 {
-            sleep(Duration::from_millis(1)).await;
-        }
-
+        buffer2.drain(0..(n * channels) as _);
         buffer1.extend(buffer3.chunks(2).map(|frame| [frame[0], frame[1]]));
         debug!(used = buffer1.used());
     }
