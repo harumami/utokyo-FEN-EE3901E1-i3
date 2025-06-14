@@ -406,6 +406,7 @@ async fn record(
                 let len = (encoder.output().len() as u32).to_le_bytes();
                 send_stream.write_all(&len).await?;
                 send_stream.write_all(encoder.output()).await?;
+                send_stream.write_all(&[0; 4]).await?;
             }
         }
     }
@@ -542,6 +543,8 @@ async fn play(
         recv_stream.read_exact(&mut buffer).await?;
         decoder.input().resize(u32::from_le_bytes(buffer) as _, 0);
         recv_stream.read_exact(decoder.input()).await?;
+        recv_stream.read_exact(&mut buffer).await?;
+        ensure!(buffer == [0; 4], "broken data");
         decoder.decode(max_frame_size)?;
         buffer2.extend_from_slice(decoder.output());
         let (n, buffer3) = resampler.resample(&buffer2)?;
