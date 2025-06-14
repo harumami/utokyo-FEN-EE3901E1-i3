@@ -271,7 +271,7 @@ async fn commute(send_stream: SendStream, recv_stream: RecvStream) -> Result<()>
     let frame_size = sample_rate as usize * 20 / 1000;
     let max_frame_size = sample_rate as usize * 120 / 1000;
     let max_packet_size = 4000;
-    let quality = 5;
+    let quality = 7;
     let exit = Arc::new(RwLock::new(false));
 
     let record_handle = spawn(record(
