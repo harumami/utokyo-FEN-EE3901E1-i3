@@ -311,7 +311,7 @@ async fn commute(send_stream: SendStream, recv_stream: RecvStream) -> Result<()>
 }
 
 #[allow(clippy::too_many_arguments)]
-#[instrument(skip(host))]
+#[instrument(skip(send_stream, host))]
 async fn record(
     mut send_stream: SendStream,
     host: Arc<Host>,
@@ -335,6 +335,7 @@ async fn record(
                 _ => 0,
             },
             config.max_sample_rate(),
+            config.sample_format().sample_size(),
         ))
     });
 
@@ -353,7 +354,7 @@ async fn record(
 
     trace!(stereo);
     let raw_sample_rate = config.sample_rate().0;
-    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as _));
+    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as usize / 10));
     let buffer1 = buffer0.clone();
     debug!("build input stream");
 
@@ -389,6 +390,7 @@ async fn record(
 
     while !*exit.read().await {
         buffer1.wait().await;
+        debug!(used = buffer1.used());
         buffer2.extend(buffer1.drain().flatten());
         let (n, buffer3) = resampler.resample(&buffer2)?;
         buffer2.drain(0..(n * channels) as usize);
@@ -412,12 +414,16 @@ async fn record(
     Result::Ok(())
 }
 
+#[instrument]
 fn data_to_frames<S: 'static + SizedSample + ToSample<f32>>(
     data: &Data,
     stereo: bool,
 ) -> impl Iterator<Item = [f32; 2]> {
     let frames = match data.as_slice::<S>() {
-        Option::Some(data) => data,
+        Option::Some(data) => {
+            debug!(data_len = data.len());
+            data
+        },
         Option::None => {
             warn!("invalid type for given data");
             &[]
@@ -441,7 +447,7 @@ fn data_to_frames<S: 'static + SizedSample + ToSample<f32>>(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[instrument(skip(host))]
+#[instrument(skip(recv_stream, host))]
 async fn play(
     mut recv_stream: RecvStream,
     host: Arc<Host>,
@@ -469,6 +475,7 @@ async fn play(
                 _ => 0,
             },
             config.max_sample_rate(),
+            config.sample_format().sample_size(),
         ))
     });
 
@@ -487,7 +494,7 @@ async fn play(
 
     trace!(stereo);
     let raw_sample_rate = config.sample_rate().0;
-    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as _));
+    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as usize / 10));
     let buffer1 = buffer0.clone();
     debug!("build output stream");
 
@@ -532,12 +539,14 @@ async fn play(
         let (n, buffer3) = resampler.resample(&buffer2)?;
         buffer2.drain(0..n as usize);
         buffer1.extend(buffer3.chunks(2).map(|frame| [frame[0], frame[1]]));
+        debug!(used = buffer1.used());
     }
 
     debug!("exit play loop");
     Result::Ok(())
 }
 
+#[instrument(skip(frames))]
 fn frames_to_data<S: 'static + SizedSample + Frame + FromSample<f32>>(
     data: &mut Data,
     frames: impl Iterator<Item = [f32; 2]>,
@@ -553,7 +562,10 @@ fn frames_to_data<S: 'static + SizedSample + Frame + FromSample<f32>>(
 
     #[allow(unused_mut)]
     for mut sample in match data.as_slice_mut::<S>() {
-        Option::Some(data) => data,
+        Option::Some(data) => {
+            debug!(data_len = data.len());
+            data
+        },
         Option::None => {
             warn!("invalid type for given data");
             &mut []
@@ -597,6 +609,10 @@ impl RingBuffer {
         }
     }
 
+    fn used(&self) -> f32 {
+        self.queue.len() as f32 / self.queue.capacity() as f32
+    }
+
     fn extend(&self, values: impl Iterator<Item = [f32; 2]>) {
         for value in values {
             self.queue.force_push(value);
@@ -623,6 +639,7 @@ struct Resampler {
 }
 
 impl Resampler {
+    #[instrument]
     fn new(channels: u32, in_rate: u32, out_rate: u32, quality: u32) -> Result<Self> {
         let mut error = 0;
 
@@ -640,6 +657,7 @@ impl Resampler {
         })
     }
 
+    #[instrument(skip(self))]
     fn resample(&mut self, in_buffer: &[f32]) -> Result<(u32, &[f32])> {
         self.out_buffer.resize(
             in_buffer.len() * self.out_rate as usize / self.in_rate as usize + 1,
@@ -663,6 +681,7 @@ impl Resampler {
         Result::Ok((in_len, &self.out_buffer[0..(self.channels * out_len) as _]))
     }
 
+    #[instrument]
     fn handle_error(error: c_int) -> Result<()> {
         if error != RESAMPLER_ERR_SUCCESS {
             let error = unsafe { CStr::from_ptr(speex_resampler_strerror(error)) }.to_str()?;
@@ -689,6 +708,7 @@ struct Encoder {
 }
 
 impl Encoder {
+    #[instrument]
     fn new(sample_rate: u32, channels: u32) -> Result<Self> {
         let mut error = 0;
 
@@ -723,6 +743,7 @@ impl Encoder {
         self.input.len() >= self.channels as usize * frame_size
     }
 
+    #[instrument(skip(self))]
     fn encode(&mut self, frame_size: usize, max_packet_size: usize) -> Result<()> {
         ensure!(self.ready(frame_size), "not enough samples");
         self.output.resize(max_packet_size, 0);
@@ -760,6 +781,7 @@ struct Decoder {
 }
 
 impl Decoder {
+    #[instrument]
     fn new(sample_rate: u32, channels: u32) -> Result<Self> {
         let mut error = 0;
         let raw = unsafe { opus_decoder_create(sample_rate as _, channels as _, &mut error) };
@@ -781,6 +803,7 @@ impl Decoder {
         &self.output
     }
 
+    #[instrument(skip(self))]
     fn decode(&mut self, max_frame_size: usize) -> Result<()> {
         self.output.resize(max_frame_size, 0.0);
 
@@ -812,6 +835,7 @@ impl Drop for Decoder {
 
 unsafe impl Send for Decoder {}
 
+#[instrument]
 fn handle_opus_error(error: c_int) -> Result<()> {
     if error < 0 {
         let error = unsafe { CStr::from_ptr(opus_strerror(error)) }.to_str()?;
