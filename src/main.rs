@@ -7,10 +7,10 @@ use {
             OPUS_APPLICATION_VOIP,
             OpusDecoder,
             OpusEncoder,
-            opus_decode,
+            opus_decode_float,
             opus_decoder_create,
             opus_decoder_destroy,
-            opus_encode,
+            opus_encode_float,
             opus_encoder_create,
             opus_encoder_destroy,
             opus_strerror,
@@ -20,7 +20,7 @@ use {
             SpeexResamplerState,
             speex_resampler_destroy,
             speex_resampler_init,
-            speex_resampler_process_interleaved_int,
+            speex_resampler_process_interleaved_float,
             speex_resampler_strerror,
         },
     },
@@ -412,10 +412,10 @@ async fn record(
     Result::Ok(())
 }
 
-fn data_to_frames<S: 'static + SizedSample + ToSample<i16>>(
+fn data_to_frames<S: 'static + SizedSample + ToSample<f32>>(
     data: &Data,
     stereo: bool,
-) -> impl Iterator<Item = [i16; 2]> {
+) -> impl Iterator<Item = [f32; 2]> {
     let frames = match data.as_slice::<S>() {
         Option::Some(data) => data,
         Option::None => {
@@ -538,14 +538,14 @@ async fn play(
     Result::Ok(())
 }
 
-fn frames_to_data<S: 'static + SizedSample + Frame + FromSample<i16>>(
+fn frames_to_data<S: 'static + SizedSample + Frame + FromSample<f32>>(
     data: &mut Data,
-    frames: impl Iterator<Item = [i16; 2]>,
+    frames: impl Iterator<Item = [f32; 2]>,
     stereo: bool,
 ) {
     let samples = match stereo {
         true => &mut frames.flatten() as &mut dyn Iterator<Item = _>,
-        false => &mut frames.map(|[sample0, sample1]| (sample0 + sample1) / 2)
+        false => &mut frames.map(|[sample0, sample1]| (sample0 + sample1) / 2.0)
             as &mut dyn Iterator<Item = _>,
     };
 
@@ -585,7 +585,7 @@ enum Command {
 }
 
 struct RingBuffer {
-    queue: ArrayQueue<[i16; 2]>,
+    queue: ArrayQueue<[f32; 2]>,
     notify: Notify,
 }
 
@@ -597,7 +597,7 @@ impl RingBuffer {
         }
     }
 
-    fn extend(&self, values: impl Iterator<Item = [i16; 2]>) {
+    fn extend(&self, values: impl Iterator<Item = [f32; 2]>) {
         for value in values {
             self.queue.force_push(value);
         }
@@ -605,7 +605,7 @@ impl RingBuffer {
         self.notify.notify_one();
     }
 
-    fn drain(&self) -> impl Iterator<Item = [i16; 2]> {
+    fn drain(&self) -> impl Iterator<Item = [f32; 2]> {
         from_fn(|| self.queue.pop())
     }
 
@@ -619,7 +619,7 @@ struct Resampler {
     channels: u32,
     in_rate: u32,
     out_rate: u32,
-    out_buffer: Vec<i16>,
+    out_buffer: Vec<f32>,
 }
 
 impl Resampler {
@@ -640,17 +640,17 @@ impl Resampler {
         })
     }
 
-    fn resample(&mut self, in_buffer: &[i16]) -> Result<(u32, &[i16])> {
+    fn resample(&mut self, in_buffer: &[f32]) -> Result<(u32, &[f32])> {
         self.out_buffer.resize(
             in_buffer.len() * self.out_rate as usize / self.in_rate as usize + 1,
-            0,
+            0.0,
         );
 
         let mut in_len = in_buffer.len() as u32 / self.channels;
         let mut out_len = self.out_buffer.len() as u32 / self.channels;
 
         let error = unsafe {
-            speex_resampler_process_interleaved_int(
+            speex_resampler_process_interleaved_float(
                 self.raw,
                 in_buffer.as_ptr(),
                 &mut in_len,
@@ -684,7 +684,7 @@ unsafe impl Send for Resampler {}
 struct Encoder {
     raw: *mut OpusEncoder,
     channels: u32,
-    input: Vec<i16>,
+    input: Vec<f32>,
     output: Vec<u8>,
 }
 
@@ -711,7 +711,7 @@ impl Encoder {
         })
     }
 
-    fn input(&mut self) -> &mut Vec<i16> {
+    fn input(&mut self) -> &mut Vec<f32> {
         &mut self.input
     }
 
@@ -728,7 +728,7 @@ impl Encoder {
         self.output.resize(max_packet_size, 0);
 
         let n = unsafe {
-            opus_encode(
+            opus_encode_float(
                 self.raw,
                 self.input.as_ptr(),
                 frame_size as _,
@@ -756,7 +756,7 @@ struct Decoder {
     raw: *mut OpusDecoder,
     channels: u32,
     input: Vec<u8>,
-    output: Vec<i16>,
+    output: Vec<f32>,
 }
 
 impl Decoder {
@@ -777,15 +777,15 @@ impl Decoder {
         &mut self.input
     }
 
-    fn output(&self) -> &[i16] {
+    fn output(&self) -> &[f32] {
         &self.output
     }
 
     fn decode(&mut self, max_frame_size: usize) -> Result<()> {
-        self.output.resize(max_frame_size, 0);
+        self.output.resize(max_frame_size, 0.0);
 
         let frames = unsafe {
-            opus_decode(
+            opus_decode_float(
                 self.raw,
                 self.input.as_ptr(),
                 self.input.len() as _,
