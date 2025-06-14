@@ -353,7 +353,7 @@ async fn record(
 
     trace!(stereo);
     let raw_sample_rate = config.sample_rate().0;
-    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as usize / 10));
+    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as _));
     let buffer1 = buffer0.clone();
     debug!("build input stream");
 
@@ -487,7 +487,7 @@ async fn play(
 
     trace!(stereo);
     let raw_sample_rate = config.sample_rate().0;
-    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as usize / 10));
+    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as _));
     let buffer1 = buffer0.clone();
     debug!("build output stream");
 
