@@ -123,6 +123,8 @@ use {
         registry::Registry,
         util::SubscriberInitExt as _,
     },
+    std::time::Duration,
+    tokio::time::sleep,
 };
 
 #[tokio::main]
@@ -274,23 +276,23 @@ async fn commute(send_stream: SendStream, recv_stream: RecvStream) -> Result<()>
     let quality = 7;
     let exit = Arc::new(RwLock::new(false));
 
-    let record_handle = spawn(record(
-        send_stream,
+    let play_handle = spawn(play(
+        recv_stream,
         host.clone(),
         sample_rate,
         channels,
-        frame_size,
+        max_frame_size,
         max_packet_size,
         quality,
         exit.clone(),
     ));
 
-    let play_handle = spawn(play(
-        recv_stream,
+    let record_handle = spawn(record(
+        send_stream,
         host,
         sample_rate,
         channels,
-        max_frame_size,
+        frame_size,
         max_packet_size,
         quality,
         exit.clone(),
@@ -498,7 +500,7 @@ async fn play(
     trace!(stereo);
     let raw_sample_rate = config.sample_rate().0;
     trace!(raw_sample_rate);
-    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as usize / 50));
+    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as usize / 10));
     let buffer1 = buffer0.clone();
     debug!("build output stream");
 
@@ -506,19 +508,23 @@ async fn play(
         device.build_output_stream_raw(
             &config.config(),
             config.sample_format(),
-            move |data, _| match data.sample_format() {
-                SampleFormat::I8 => frames_to_data::<i8>(data, buffer0.drain(), stereo),
-                SampleFormat::I16 => frames_to_data::<i16>(data, buffer0.drain(), stereo),
-                SampleFormat::I24 => frames_to_data::<I24>(data, buffer0.drain(), stereo),
-                SampleFormat::I32 => frames_to_data::<i32>(data, buffer0.drain(), stereo),
-                SampleFormat::I64 => frames_to_data::<i64>(data, buffer0.drain(), stereo),
-                SampleFormat::U8 => frames_to_data::<u8>(data, buffer0.drain(), stereo),
-                SampleFormat::U16 => frames_to_data::<u16>(data, buffer0.drain(), stereo),
-                SampleFormat::U32 => frames_to_data::<u32>(data, buffer0.drain(), stereo),
-                SampleFormat::U64 => frames_to_data::<u64>(data, buffer0.drain(), stereo),
-                SampleFormat::F32 => frames_to_data::<f32>(data, buffer0.drain(), stereo),
-                SampleFormat::F64 => frames_to_data::<f64>(data, buffer0.drain(), stereo),
-                _ => (),
+            move |data, _| {
+                match data.sample_format() {
+                    SampleFormat::I8 => frames_to_data::<i8>(data, buffer0.drain(), stereo),
+                    SampleFormat::I16 => frames_to_data::<i16>(data, buffer0.drain(), stereo),
+                    SampleFormat::I24 => frames_to_data::<I24>(data, buffer0.drain(), stereo),
+                    SampleFormat::I32 => frames_to_data::<i32>(data, buffer0.drain(), stereo),
+                    SampleFormat::I64 => frames_to_data::<i64>(data, buffer0.drain(), stereo),
+                    SampleFormat::U8 => frames_to_data::<u8>(data, buffer0.drain(), stereo),
+                    SampleFormat::U16 => frames_to_data::<u16>(data, buffer0.drain(), stereo),
+                    SampleFormat::U32 => frames_to_data::<u32>(data, buffer0.drain(), stereo),
+                    SampleFormat::U64 => frames_to_data::<u64>(data, buffer0.drain(), stereo),
+                    SampleFormat::F32 => frames_to_data::<f32>(data, buffer0.drain(), stereo),
+                    SampleFormat::F64 => frames_to_data::<f64>(data, buffer0.drain(), stereo),
+                    _ => (),
+                }
+
+                debug!(used = buffer0.used());
             },
             |error| error!(error = &error as &dyn Error),
             Option::None,
@@ -542,6 +548,11 @@ async fn play(
         buffer2.extend_from_slice(decoder.output());
         let (n, buffer3) = resampler.resample(&buffer2)?;
         buffer2.drain(0..n as usize);
+
+        while buffer1.used() > 0.8 {
+            sleep(Duration::from_millis(1)).await;
+        }
+
         buffer1.extend(buffer3.chunks(2).map(|frame| [frame[0], frame[1]]));
         debug!(used = buffer1.used());
     }
