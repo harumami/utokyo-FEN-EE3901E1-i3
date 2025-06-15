@@ -28,16 +28,6 @@ use {
         Parser,
         Subcommand,
     },
-    ::color_eyre::{
-        eyre::{
-            OptionExt as _,
-            Result,
-            bail,
-            ensure,
-            eyre,
-        },
-        install,
-    },
     ::cpal::{
         Data,
         FromSample,
@@ -76,6 +66,13 @@ use {
             SendStream,
         },
     },
+    ::rancor::{
+        BoxedError,
+        OptionExt as _,
+        ResultExt as _,
+        Source,
+        fail,
+    },
     ::rand::rngs::OsRng,
     ::std::{
         cmp::Reverse,
@@ -83,6 +80,11 @@ use {
         ffi::{
             CStr,
             c_int,
+        },
+        fmt::{
+            Display,
+            Formatter,
+            Result as FmtResult,
         },
         io::{
             BufWriter,
@@ -127,9 +129,9 @@ use {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match init() {
+    match init::<BoxedError>() {
         Result::Ok(result) => match result {
-            Result::Ok((command, _guard)) => match run(command).await {
+            Result::Ok((command, _guard)) => match run::<BoxedError>(command).await {
                 Result::Ok(()) => ExitCode::SUCCESS,
                 Result::Err(error) => {
                     eprintln!("{error}");
@@ -145,16 +147,14 @@ async fn main() -> ExitCode {
     }
 }
 
-fn init() -> Result<Result<(Command, WorkerGuard), ExitCode>> {
-    install()?;
-
+fn init<E: Source>() -> Result<Result<(Command, WorkerGuard), ExitCode>, E> {
     let Args {
         command,
         tracing,
     } = match Args::try_parse() {
         Result::Ok(args) => args,
         Result::Err(error) => {
-            error.print()?;
+            error.print().into_error()?;
 
             return Result::Ok(Result::Err(match error.exit_code() {
                 0 => ExitCode::SUCCESS,
@@ -166,16 +166,17 @@ fn init() -> Result<Result<(Command, WorkerGuard), ExitCode>> {
     let (writer, guard) = NonBlocking::new(BufWriter::new(stderr()));
 
     Registry::default()
-        .with(EnvFilter::try_new(tracing.as_deref().unwrap_or(""))?)
+        .with(EnvFilter::try_new(tracing.as_deref().unwrap_or("")).into_error()?)
         .with(Layer::new().with_writer(writer))
         .with(ErrorLayer::default())
-        .try_init()?;
+        .try_init()
+        .into_error()?;
 
     Result::Ok(Result::Ok((command, guard)))
 }
 
 #[instrument(skip(command))]
-async fn run(command: Command) -> Result<()> {
+async fn run<E: Source>(command: Command) -> Result<(), E> {
     let alpn = b"/eeic-i3/31";
 
     match command {
@@ -189,8 +190,8 @@ async fn run(command: Command) -> Result<()> {
             debug!("accept connection");
 
             let connection = loop {
-                match endpoint.accept().await.ok_or_eyre("no incoming")?.accept() {
-                    Result::Ok(connecting) => break connecting.await?,
+                match endpoint.accept().await.into_error()?.accept() {
+                    Result::Ok(connecting) => break connecting.await.into_error()?,
                     Result::Err(error) => {
                         debug!(error = &error as &dyn Error);
                         continue;
@@ -201,7 +202,7 @@ async fn run(command: Command) -> Result<()> {
             trace!(?connection);
             info!("accepted connection");
             debug!("accept bi stream");
-            let (send_stream, recv_stream) = connection.accept_bi().await?;
+            let (send_stream, recv_stream) = connection.accept_bi().await.into_error()?;
             commute(send_stream, recv_stream).await?;
             debug!("close endpoint");
             endpoint.close().await;
@@ -215,12 +216,13 @@ async fn run(command: Command) -> Result<()> {
             let connection = endpoint
                 .connect(node_id, alpn)
                 .await
-                .map_err(|error| eyre!(error.into_boxed_dyn_error()))?;
+                .map_err(|error| AppError::Boxed(error.into_boxed_dyn_error()))
+                .into_error()?;
 
             trace!(?connection);
             info!("connected to peer");
             debug!("open bi stream");
-            let (send_stream, recv_stream) = connection.open_bi().await?;
+            let (send_stream, recv_stream) = connection.open_bi().await.into_error()?;
             commute(send_stream, recv_stream).await?;
             debug!("close endpoint");
             endpoint.close().await;
@@ -238,7 +240,7 @@ fn generate() -> SecretKey {
 }
 
 #[instrument]
-async fn bind(secret: Option<SecretKey>, alpn: &[u8]) -> Result<Endpoint> {
+async fn bind<E: Source>(secret: Option<SecretKey>, alpn: &[u8]) -> Result<Endpoint, E> {
     let secret = match secret {
         Option::Some(secret) => secret,
         Option::None => generate(),
@@ -256,14 +258,15 @@ async fn bind(secret: Option<SecretKey>, alpn: &[u8]) -> Result<Endpoint> {
         .discovery_n0()
         .bind()
         .await
-        .map_err(|error| eyre!(error.into_boxed_dyn_error()))?;
+        .map_err(|error| AppError::Boxed(error.into_boxed_dyn_error()))
+        .into_error()?;
 
     trace!(?endpoint);
     Result::Ok(endpoint)
 }
 
 #[instrument]
-async fn commute(send_stream: SendStream, recv_stream: RecvStream) -> Result<()> {
+async fn commute<E: Source>(send_stream: SendStream, recv_stream: RecvStream) -> Result<(), E> {
     let host = Arc::new(default_host());
     trace!(host = ?host.id());
     let sample_rate = 48000;
@@ -274,7 +277,7 @@ async fn commute(send_stream: SendStream, recv_stream: RecvStream) -> Result<()>
     let quality = 7;
     let exit = Arc::new(RwLock::new(false));
 
-    let play_handle = spawn(play(
+    let play_handle = spawn(play::<E>(
         recv_stream,
         host.clone(),
         sample_rate,
@@ -285,7 +288,7 @@ async fn commute(send_stream: SendStream, recv_stream: RecvStream) -> Result<()>
         exit.clone(),
     ));
 
-    let record_handle = spawn(record(
+    let record_handle = spawn(record::<E>(
         send_stream,
         host,
         sample_rate,
@@ -296,15 +299,15 @@ async fn commute(send_stream: SendStream, recv_stream: RecvStream) -> Result<()>
         exit.clone(),
     ));
 
-    ctrl_c().await?;
+    ctrl_c().await.into_error()?;
     *exit.write().await = true;
 
-    if let Result::Err(error) = record_handle.await? {
-        eprintln!("{error}");
+    if let Result::Err(error) = record_handle.await.into_error()? {
+        info!(error = &error as &dyn Error);
     }
 
-    if let Result::Err(error) = play_handle.await? {
-        eprintln!("{error}");
+    if let Result::Err(error) = play_handle.await.into_error()? {
+        info!(error = &error as &dyn Error);
     }
 
     Result::Ok(())
@@ -312,7 +315,7 @@ async fn commute(send_stream: SendStream, recv_stream: RecvStream) -> Result<()>
 
 #[allow(clippy::too_many_arguments)]
 #[instrument(skip(send_stream, host))]
-async fn record(
+async fn record<E: Source>(
     mut send_stream: SendStream,
     host: Arc<Host>,
     sample_rate: u32,
@@ -321,11 +324,15 @@ async fn record(
     max_packet_size: usize,
     quality: u32,
     exit: Arc<RwLock<bool>>,
-) -> Result<()> {
+) -> Result<(), E> {
     debug!("get input device");
-    let device = host.default_input_device().ok_or_eyre("no input device")?;
-    trace!(device = device.name()?);
-    let mut configs = device.supported_input_configs()?.collect::<Vec<_>>();
+    let device = host.default_input_device().into_error()?;
+    trace!(device = device.name().into_error()?);
+
+    let mut configs = device
+        .supported_input_configs()
+        .into_error()?
+        .collect::<Vec<_>>();
 
     configs.sort_by_key(|config| {
         Reverse((
@@ -340,17 +347,15 @@ async fn record(
         ))
     });
 
-    let config = configs
-        .first()
-        .ok_or_eyre("no input configuration")?
-        .with_max_sample_rate();
-
+    let config = configs.first().into_error()?.with_max_sample_rate();
     trace!(?config);
 
     let stereo = match config.channels() {
         1 => false,
         2 => true,
-        _ => bail!("no input configuration which is stereo or mono"),
+        _ => fail!(AppError::Raw(
+            "no input configuration which is stereo or mono"
+        )),
     };
 
     trace!(stereo);
@@ -382,9 +387,11 @@ async fn record(
             Option::None,
         )
     })
-    .await??;
+    .await
+    .into_error()?
+    .into_error()?;
 
-    input_stream.play()?;
+    input_stream.play().into_error()?;
     let mut buffer2 = Vec::new();
     let mut resampler = Resampler::new(channels, raw_sample_rate, sample_rate, quality)?;
     let mut encoder = Encoder::new(sample_rate, channels)?;
@@ -404,16 +411,16 @@ async fn record(
             if !encoder.output.is_empty() {
                 debug!("send opus packet");
                 let len = (encoder.output().len() as u32).to_le_bytes();
-                send_stream.write_all(&len).await?;
-                send_stream.write_all(encoder.output()).await?;
-                send_stream.write_all(&[0; 4]).await?;
+                send_stream.write_all(&len).await.into_error()?;
+                send_stream.write_all(encoder.output()).await.into_error()?;
+                send_stream.write_all(&[0; 4]).await.into_error()?;
             }
         }
     }
 
     debug!("exit record loop");
-    send_stream.finish()?;
-    send_stream.stopped().await?;
+    send_stream.finish().into_error()?;
+    send_stream.stopped().await.into_error()?;
     Result::Ok(())
 }
 
@@ -451,7 +458,7 @@ fn data_to_frames<S: 'static + SizedSample + ToSample<f32>>(
 
 #[allow(clippy::too_many_arguments)]
 #[instrument(skip(recv_stream, host))]
-async fn play(
+async fn play<E: Source>(
     mut recv_stream: RecvStream,
     host: Arc<Host>,
     sample_rate: u32,
@@ -460,15 +467,15 @@ async fn play(
     max_packet_size: usize,
     quality: u32,
     exit: Arc<RwLock<bool>>,
-) -> Result<()> {
+) -> Result<(), E> {
     debug!("get output device");
+    let device = host.default_output_device().into_error()?;
+    trace!(device = device.name().into_error()?);
 
-    let device = host
-        .default_output_device()
-        .ok_or_eyre("no output device")?;
-
-    trace!(device = device.name()?);
-    let mut configs = device.supported_output_configs()?.collect::<Vec<_>>();
+    let mut configs = device
+        .supported_output_configs()
+        .into_error()?
+        .collect::<Vec<_>>();
 
     configs.sort_by_key(|config| {
         Reverse((
@@ -483,17 +490,15 @@ async fn play(
         ))
     });
 
-    let config = configs
-        .first()
-        .ok_or_eyre("no output configuration")?
-        .with_max_sample_rate();
-
+    let config = configs.first().into_error()?.with_max_sample_rate();
     trace!(?config);
 
     let stereo = match config.channels() {
         1 => false,
         2 => true,
-        _ => bail!("no output configuration which is stereo or mono"),
+        _ => fail!(AppError::Raw(
+            "no output configuration which is stereo or mono"
+        )),
     };
 
     trace!(stereo);
@@ -525,9 +530,11 @@ async fn play(
             Option::None,
         )
     })
-    .await??;
+    .await
+    .into_error()?
+    .into_error()?;
 
-    output_stream.play()?;
+    output_stream.play().into_error()?;
     let mut buffer2 = Vec::new();
     let mut decoder = Decoder::new(sample_rate, channels)?;
     let mut resampler = Resampler::new(channels, sample_rate, raw_sample_rate, quality)?;
@@ -536,11 +543,15 @@ async fn play(
     while !*exit.read().await {
         debug!("receive opus packed");
         let mut buffer = [0; 4];
-        recv_stream.read_exact(&mut buffer).await?;
+        recv_stream.read_exact(&mut buffer).await.into_error()?;
         decoder.input().resize(u32::from_le_bytes(buffer) as _, 0);
-        recv_stream.read_exact(decoder.input()).await?;
-        recv_stream.read_exact(&mut buffer).await?;
-        ensure!(buffer == [0; 4], "broken data");
+        recv_stream.read_exact(decoder.input()).await.into_error()?;
+        recv_stream.read_exact(&mut buffer).await.into_error()?;
+
+        if buffer != [0; 4] {
+            fail!(AppError::Raw("broken data"));
+        }
+
         decoder.decode(max_frame_size)?;
         buffer2.extend_from_slice(decoder.output());
         let (n, buffer3) = resampler.resample(&buffer2)?;
@@ -647,13 +658,13 @@ struct Resampler {
 
 impl Resampler {
     #[instrument]
-    fn new(channels: u32, in_rate: u32, out_rate: u32, quality: u32) -> Result<Self> {
+    fn new<E: Source>(channels: u32, in_rate: u32, out_rate: u32, quality: u32) -> Result<Self, E> {
         let mut error = 0;
 
         let raw =
             unsafe { speex_resampler_init(channels, in_rate, out_rate, quality as _, &mut error) };
 
-        Self::handle_error(error)?;
+        handle_speex_error(error)?;
 
         Result::Ok(Self {
             raw,
@@ -665,7 +676,7 @@ impl Resampler {
     }
 
     #[instrument(skip(self))]
-    fn resample(&mut self, in_buffer: &[f32]) -> Result<(u32, &[f32])> {
+    fn resample<E: Source>(&mut self, in_buffer: &[f32]) -> Result<(u32, &[f32]), E> {
         self.out_buffer.resize(
             in_buffer.len() * self.out_rate as usize / self.in_rate as usize + 1,
             0.0,
@@ -684,18 +695,8 @@ impl Resampler {
             )
         };
 
-        Self::handle_error(error)?;
+        handle_speex_error(error)?;
         Result::Ok((in_len, &self.out_buffer[0..(self.channels * out_len) as _]))
-    }
-
-    #[instrument]
-    fn handle_error(error: c_int) -> Result<()> {
-        if error != RESAMPLER_ERR_SUCCESS {
-            let error = unsafe { CStr::from_ptr(speex_resampler_strerror(error)) }.to_str()?;
-            bail!("speex error: {error}");
-        }
-
-        Result::Ok(())
     }
 }
 
@@ -716,7 +717,7 @@ struct Encoder {
 
 impl Encoder {
     #[instrument]
-    fn new(sample_rate: u32, channels: u32) -> Result<Self> {
+    fn new<E: Source>(sample_rate: u32, channels: u32) -> Result<Self, E> {
         let mut error = 0;
 
         let raw = unsafe {
@@ -751,8 +752,11 @@ impl Encoder {
     }
 
     #[instrument(skip(self))]
-    fn encode(&mut self, frame_size: usize, max_packet_size: usize) -> Result<()> {
-        ensure!(self.ready(frame_size), "not enough samples");
+    fn encode<E: Source>(&mut self, frame_size: usize, max_packet_size: usize) -> Result<(), E> {
+        if !self.ready(frame_size) {
+            fail!(AppError::Raw("not enough samples"));
+        }
+
         self.output.resize(max_packet_size, 0);
 
         let n = unsafe {
@@ -789,7 +793,7 @@ struct Decoder {
 
 impl Decoder {
     #[instrument]
-    fn new(sample_rate: u32, channels: u32) -> Result<Self> {
+    fn new<E: Source>(sample_rate: u32, channels: u32) -> Result<Self, E> {
         let mut error = 0;
         let raw = unsafe { opus_decoder_create(sample_rate as _, channels as _, &mut error) };
         handle_opus_error(error)?;
@@ -811,7 +815,7 @@ impl Decoder {
     }
 
     #[instrument(skip(self))]
-    fn decode(&mut self, max_frame_size: usize) -> Result<()> {
+    fn decode<E: Source>(&mut self, max_frame_size: usize) -> Result<(), E> {
         self.output.resize(max_frame_size, 0.0);
 
         let frames = unsafe {
@@ -843,11 +847,48 @@ impl Drop for Decoder {
 unsafe impl Send for Decoder {}
 
 #[instrument]
-fn handle_opus_error(error: c_int) -> Result<()> {
+fn handle_opus_error<E: Source>(error: c_int) -> Result<(), E> {
     if error < 0 {
-        let error = unsafe { CStr::from_ptr(opus_strerror(error)) }.to_str()?;
-        bail!("opus error: {error}");
+        let error = unsafe { CStr::from_ptr(opus_strerror(error)) }
+            .to_str()
+            .into_error()?;
+
+        fail!(AppError::Opus(error));
     }
 
     Result::Ok(())
 }
+
+#[instrument]
+fn handle_speex_error<E: Source>(error: c_int) -> Result<(), E> {
+    if error != RESAMPLER_ERR_SUCCESS {
+        let error = unsafe { CStr::from_ptr(speex_resampler_strerror(error)) }
+            .to_str()
+            .into_error()?;
+
+        fail!(AppError::Speex(error));
+    }
+
+    Result::Ok(())
+}
+
+#[derive(Debug)]
+enum AppError {
+    Raw(&'static str),
+    Boxed(Box<dyn Error + Send + Sync + 'static>),
+    Opus(&'static str),
+    Speex(&'static str),
+}
+
+impl Display for AppError {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        match self {
+            Self::Raw(message) => write!(f, "{message}"),
+            Self::Boxed(error) => write!(f, "{error}"),
+            Self::Opus(error) => write!(f, "opus error: {error}"),
+            Self::Speex(error) => write!(f, "speex error: {error}"),
+        }
+    }
+}
+
+impl Error for AppError {}

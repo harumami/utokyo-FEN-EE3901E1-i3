@@ -5,11 +5,11 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.40", features = ["derive"] }
-color-eyre = "0.6.5"
 cpal = "0.16.0"
 crossbeam = "0.8.4"
 dasp = { version = "0.11.0", features = ["signal"] }
 iroh = "0.35.0"
+rancor = "0.1.0"
 rand = "0.8.5"
 tokio = "1.45.1"
 tracing = "0.1.41"
