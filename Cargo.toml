@@ -1,6 +1,6 @@
 [package]
 name = "utokyo-FEN-EE3901E1-i3"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
