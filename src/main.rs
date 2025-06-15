@@ -273,6 +273,7 @@ async fn bind<E: Source>(secret: Option<SecretKey>, alpn: &[u8]) -> Result<Endpo
 
 #[instrument]
 async fn commute<E: Source>(send_stream: SendStream, recv_stream: RecvStream) -> Result<(), E> {
+    println!("Let's talk!");
     let host = Arc::new(default_host());
     trace!(host = ?host.id());
     let sample_rate = 48000;
@@ -316,6 +317,7 @@ async fn commute<E: Source>(send_stream: SendStream, recv_stream: RecvStream) ->
         warn!(error = &error as &dyn Error);
     }
 
+    println!("Bye.");
     Result::Ok(())
 }
 
