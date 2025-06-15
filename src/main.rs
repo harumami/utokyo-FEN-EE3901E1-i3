@@ -306,8 +306,13 @@ async fn commute<E: Source>(send_stream: SendStream, recv_stream: RecvStream) ->
         exit.clone(),
     ));
 
-    ctrl_c().await.into_error()?;
-    *exit.write().await = true;
+    spawn(async move {
+        if let Result::Err(error) = ctrl_c().await {
+            error!(error = &error as &dyn Error);
+        }
+
+        *exit.write().await = true;
+    });
 
     if let Result::Err(error) = record_handle.await.into_error()? {
         warn!(error = &error as &dyn Error);
