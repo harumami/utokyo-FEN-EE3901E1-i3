@@ -125,6 +125,7 @@ use {
         registry::Registry,
         util::SubscriberInitExt as _,
     },
+    tracing::level_filters::LevelFilter,
 };
 
 #[tokio::main]
@@ -134,7 +135,7 @@ async fn main() -> ExitCode {
             Result::Ok((command, _guard)) => match run::<BoxedError>(command).await {
                 Result::Ok(()) => ExitCode::SUCCESS,
                 Result::Err(error) => {
-                    eprintln!("{error}");
+                    error!(error = &error as &dyn Error);
                     ExitCode::FAILURE
                 },
             },
@@ -166,7 +167,12 @@ fn init<E: Source>() -> Result<Result<(Command, WorkerGuard), ExitCode>, E> {
     let (writer, guard) = NonBlocking::new(BufWriter::new(stderr()));
 
     Registry::default()
-        .with(EnvFilter::try_new(tracing.as_deref().unwrap_or("")).into_error()?)
+        .with(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::ERROR.into())
+                .parse(tracing.as_deref().unwrap_or(""))
+                .into_error()?,
+        )
         .with(Layer::new().with_writer(writer))
         .with(ErrorLayer::default())
         .try_init()
@@ -181,7 +187,7 @@ async fn run<E: Source>(command: Command) -> Result<(), E> {
 
     match command {
         Command::Generate => {
-            println!("{}", generate());
+            println!("Your SECRET: {}", generate());
         },
         Command::Host {
             secret,
@@ -249,7 +255,7 @@ async fn bind<E: Source>(secret: Option<SecretKey>, alpn: &[u8]) -> Result<Endpo
     info!(%secret, "use secret key");
     let node_id = secret.public();
     info!(%node_id, "bind to node id");
-    println!("{node_id}");
+    println!("Your Node ID: {node_id}");
     debug!("open endpoint");
 
     let endpoint = Endpoint::builder()
@@ -303,11 +309,11 @@ async fn commute<E: Source>(send_stream: SendStream, recv_stream: RecvStream) ->
     *exit.write().await = true;
 
     if let Result::Err(error) = record_handle.await.into_error()? {
-        info!(error = &error as &dyn Error);
+        warn!(error = &error as &dyn Error);
     }
 
     if let Result::Err(error) = play_handle.await.into_error()? {
-        info!(error = &error as &dyn Error);
+        warn!(error = &error as &dyn Error);
     }
 
     Result::Ok(())
