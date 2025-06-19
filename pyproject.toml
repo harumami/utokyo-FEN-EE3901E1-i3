@@ -1,0 +1,4 @@
+[project]
+name = "utokyo-fen-ee3901e1-i3"
+version = "0.0.0"
+requires-python = ">=3.13"
