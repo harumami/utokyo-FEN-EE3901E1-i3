@@ -1,7 +1,5 @@
 target
 vcpkg_installed
-**/__pycache__
-src/opus.rs
-src/speex.rs
 Cargo.lock
 uv.lock
+**/__pycache__

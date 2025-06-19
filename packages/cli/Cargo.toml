@@ -16,6 +16,5 @@ tracing.workspace = true
 tracing-appender.workspace = true
 tracing-error.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-
-[build-dependencies]
-bindgen.workspace = true
+opus-sys = { workspace = true }
+speex-sys = { workspace = true }

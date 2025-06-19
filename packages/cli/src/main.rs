@@ -1,29 +1,4 @@
-mod opus;
-mod speex;
-
 use {
-    crate::{
-        opus::{
-            OPUS_APPLICATION_VOIP,
-            OpusDecoder,
-            OpusEncoder,
-            opus_decode_float,
-            opus_decoder_create,
-            opus_decoder_destroy,
-            opus_encode_float,
-            opus_encoder_create,
-            opus_encoder_destroy,
-            opus_strerror,
-        },
-        speex::{
-            RESAMPLER_ERR_SUCCESS,
-            SpeexResamplerState,
-            speex_resampler_destroy,
-            speex_resampler_init,
-            speex_resampler_process_interleaved_float,
-            speex_resampler_strerror,
-        },
-    },
     ::clap::{
         Parser,
         Subcommand,
@@ -61,6 +36,18 @@ use {
         SecretKey,
         endpoint::Endpoint,
     },
+    ::opus_sys::{
+        OPUS_APPLICATION_VOIP,
+        OpusDecoder,
+        OpusEncoder,
+        opus_decode_float,
+        opus_decoder_create,
+        opus_decoder_destroy,
+        opus_encode_float,
+        opus_encoder_create,
+        opus_encoder_destroy,
+        opus_strerror,
+    },
     ::rancor::{
         BoxedError,
         OptionExt as _,
@@ -69,6 +56,14 @@ use {
         fail,
     },
     ::rand::rngs::OsRng,
+    ::speex_sys::{
+        RESAMPLER_ERR_SUCCESS,
+        SpeexResamplerState,
+        speex_resampler_destroy,
+        speex_resampler_init,
+        speex_resampler_process_interleaved_float,
+        speex_resampler_strerror,
+    },
     ::std::{
         cmp::Reverse,
         error::Error,
