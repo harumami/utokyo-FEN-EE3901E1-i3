@@ -1,8 +1,8 @@
 #[allow(deprecated)]
-use bindgen::CargoCallbacks;
+use ::bindgen::CargoCallbacks;
 use {
-    bindgen::builder,
-    std::env::var,
+    ::bindgen::builder,
+    ::std::env::var,
 };
 
 fn main() {
