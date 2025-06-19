@@ -81,6 +81,8 @@ use {
             stderr,
         },
         iter::from_fn,
+        marker::PhantomData,
+        ops::Deref,
         process::ExitCode,
         sync::Arc,
     },
@@ -217,7 +219,7 @@ fn run<E: Source>(command: Command) -> Result<(), E> {
                 let connection = endpoint
                     .connect(node_id, alpn)
                     .await
-                    .map_err(|error| AppError::Boxed(error.into_boxed_dyn_error()))
+                    .map_err(|error| MiscError::Boxed(error.into_boxed_dyn_error()))
                     .into_error()?;
 
                 trace!(?connection);
@@ -233,61 +235,16 @@ fn run<E: Source>(command: Command) -> Result<(), E> {
     };
 
     debug!("get default audio host");
-    let host = Arc::new(default_host());
-    trace!(host = ?host.id());
-    debug!("get input audio device");
-    let input_device = host.default_input_device().into_error()?;
-    trace!(input_device = input_device.name().into_error()?);
-
-    let mut input_configs = input_device
-        .supported_input_configs()
-        .into_error()?
-        .collect::<Vec<_>>();
-
-    input_configs.sort_by_key(config_sort_key);
-    let input_config = input_configs.first().into_error()?.with_max_sample_rate();
-    trace!(?input_config);
-
-    let input_stereo = match input_config.channels() {
-        1 => false,
-        2 => true,
-        _ => fail!(AppError::Raw(
-            "no input configuration which is stereo or mono"
-        )),
-    };
-
-    trace!(input_stereo);
-    let input_sample_rate = input_config.sample_rate().0;
-    trace!(input_sample_rate);
-    let input_ring0 = Arc::new(RingBuffer::new(input_sample_rate as usize / 10));
-    let input_ring1 = input_ring0.clone();
-
-    debug!("get output audio device");
-    let output_device = host.default_output_device().into_error()?;
-    trace!(output_device = output_device.name().into_error()?);
-
-    let mut output_configs = output_device
-        .supported_output_configs()
-        .into_error()?
-        .collect::<Vec<_>>();
-
-    output_configs.sort_by_key(config_sort_key);
-    let output_config = output_configs.first().into_error()?.with_max_sample_rate();
-    trace!(?output_config);
-
-    let output_stereo = match output_config.channels() {
-        1 => false,
-        2 => true,
-        _ => fail!(AppError::Raw(
-            "no output configuration which is stereo or mono"
-        )),
-    };
-
-    trace!(output_stereo);
-    let output_sample_rate = output_config.sample_rate().0;
-    trace!(output_sample_rate);
-    let output_ring0 = Arc::new(RingBuffer::new(output_sample_rate as usize / 10));
-    let output_ring1 = output_ring0.clone();
+    let host0 = Arc::new(default_host());
+    let host1 = host0.clone();
+    trace!(host = ?host0.id());
+    debug!("start communication");
+    let sample_rate = 48000;
+    let channels = 2;
+    let frame_size = sample_rate as usize * 20 / 1000;
+    let max_frame_size = sample_rate as usize * 120 / 1000;
+    let max_packet_size = 4000;
+    let quality = 7;
     let exit0 = Arc::new(RwLock::new(false));
     let exit1 = exit0.clone();
     let exit2 = exit1.clone();
@@ -300,147 +257,235 @@ fn run<E: Source>(command: Command) -> Result<(), E> {
         *exit0.write().await = true;
     });
 
-    debug!("start communication");
-    let sample_rate = 48000;
-    let channels = 2;
-    let frame_size = sample_rate as usize * 20 / 1000;
-    let max_frame_size = sample_rate as usize * 120 / 1000;
-    let max_packet_size = 4000;
-    let quality = 7;
+    let runtime_handle0 = runtime.handle().clone();
+    let runtime_handle1 = runtime.handle().clone();
 
-    let record_handle = runtime.spawn(async move {
-        let mut buffer = Vec::new();
-        let mut resampler = Resampler::new(channels, input_sample_rate, sample_rate, quality)?;
-        let mut encoder = Encoder::new(sample_rate, channels)?;
-        debug!("start record loop");
+    let record_handle = runtime.spawn_blocking(move || {
+        debug!("get input audio device");
+        let input_device = host0.default_input_device().into_error()?;
+        trace!(input_device = input_device.name().into_error()?);
 
-        while !*exit1.read().await {
-            input_ring0.wait().await;
-            debug!(used = input_ring0.used());
-            buffer.extend(input_ring0.drain().flatten());
-            let (n, buffer3) = resampler.resample(&buffer)?;
-            buffer.drain(0..(n * channels) as _);
-            encoder.input().extend(buffer3);
+        let mut input_configs = input_device
+            .supported_input_configs()
+            .into_error()?
+            .collect::<Vec<_>>();
 
-            while encoder.ready(frame_size) {
-                encoder.encode(frame_size, max_packet_size)?;
+        input_configs.sort_by_key(config_sort_key);
+        let input_config = input_configs.first().into_error()?.with_max_sample_rate();
+        trace!(?input_config);
 
-                if !encoder.output.is_empty() {
-                    debug!("send opus packet");
-                    let len = (encoder.output().len() as u32).to_le_bytes();
-                    send_stream.write_all(&len).await.into_error()?;
-                    send_stream.write_all(encoder.output()).await.into_error()?;
-                    send_stream.write_all(&[0; 4]).await.into_error()?;
+        let input_stereo = match input_config.channels() {
+            1 => false,
+            2 => true,
+            _ => fail!(MiscError::Raw(
+                "no input configuration which is stereo or mono"
+            )),
+        };
+
+        trace!(input_stereo);
+        let input_sample_rate = input_config.sample_rate().0;
+        trace!(input_sample_rate);
+        let input_ring0 = Arc::new(RingBuffer::new(input_sample_rate as usize / 10));
+        let input_ring1 = input_ring0.clone();
+
+        let record_handle = runtime_handle0.spawn(async move {
+            let mut buffer = Vec::new();
+            let mut resampler = Resampler::new(channels, input_sample_rate, sample_rate, quality)?;
+            let mut encoder = Encoder::new(sample_rate, channels)?;
+            debug!("start record loop");
+
+            while !*exit1.read().await {
+                input_ring0.wait().await;
+                debug!(used = input_ring0.used());
+                buffer.extend(input_ring0.drain().flatten());
+                let (n, buffer3) = resampler.resample(&buffer)?;
+                buffer.drain(0..(n * channels) as _);
+                encoder.input().extend(buffer3);
+
+                while encoder.ready(frame_size) {
+                    encoder.encode(frame_size, max_packet_size)?;
+
+                    if !encoder.output.is_empty() {
+                        debug!("send opus packet");
+                        let len = (encoder.output().len() as u32).to_le_bytes();
+                        send_stream.write_all(&len).await.into_error()?;
+                        send_stream.write_all(encoder.output()).await.into_error()?;
+                        send_stream.write_all(&[0; 4]).await.into_error()?;
+                    }
                 }
             }
-        }
 
-        debug!("exit record loop");
-        send_stream.finish().into_error()?;
-        send_stream.stopped().await.into_error()?;
+            debug!("exit record loop");
+            send_stream.finish().into_error()?;
+            send_stream.stopped().await.into_error()?;
+            Result::<_, E>::Ok(())
+        });
+
+        debug!("build input audio stream");
+
+        let input_stream = ThreadBound::new(
+            input_device
+                .build_input_stream_raw(
+                    &input_config.config(),
+                    input_config.sample_format(),
+                    move |data, _| match data.sample_format() {
+                        SampleFormat::I8 => {
+                            input_ring1.extend(data_to_frames::<i8>(data, input_stereo))
+                        },
+                        SampleFormat::I16 => {
+                            input_ring1.extend(data_to_frames::<i16>(data, input_stereo))
+                        },
+                        SampleFormat::I24 => {
+                            input_ring1.extend(data_to_frames::<I24>(data, input_stereo))
+                        },
+                        SampleFormat::I32 => {
+                            input_ring1.extend(data_to_frames::<i32>(data, input_stereo))
+                        },
+                        SampleFormat::I64 => {
+                            input_ring1.extend(data_to_frames::<i64>(data, input_stereo))
+                        },
+                        SampleFormat::U8 => {
+                            input_ring1.extend(data_to_frames::<u8>(data, input_stereo))
+                        },
+                        SampleFormat::U16 => {
+                            input_ring1.extend(data_to_frames::<u16>(data, input_stereo))
+                        },
+                        SampleFormat::U32 => {
+                            input_ring1.extend(data_to_frames::<u32>(data, input_stereo))
+                        },
+                        SampleFormat::U64 => {
+                            input_ring1.extend(data_to_frames::<u64>(data, input_stereo))
+                        },
+                        SampleFormat::F32 => {
+                            input_ring1.extend(data_to_frames::<f32>(data, input_stereo))
+                        },
+                        SampleFormat::F64 => {
+                            input_ring1.extend(data_to_frames::<f64>(data, input_stereo))
+                        },
+                        _ => (),
+                    },
+                    |error| error!(error = &error as &dyn Error),
+                    Option::None,
+                )
+                .into_error()?,
+        );
+
+        input_stream.play().into_error()?;
+        runtime_handle0.block_on(record_handle).into_error()??;
         Result::<_, E>::Ok(())
     });
 
-    let play_handle = runtime.spawn(async move {
-        let mut buffer0 = Vec::new();
-        let mut decoder = Decoder::new(sample_rate, channels)?;
-        let mut resampler = Resampler::new(channels, sample_rate, output_sample_rate, quality)?;
-        debug!("start play loop");
+    let play_handle = runtime.spawn_blocking(move || {
+        debug!("get output audio device");
+        let output_device = host1.default_output_device().into_error()?;
+        trace!(output_device = output_device.name().into_error()?);
 
-        while !*exit2.read().await {
-            debug!("receive opus packed");
-            let mut buffer1 = [0; 4];
-            recv_stream.read_exact(&mut buffer1).await.into_error()?;
-            decoder.input().resize(u32::from_le_bytes(buffer1) as _, 0);
-            recv_stream.read_exact(decoder.input()).await.into_error()?;
-            recv_stream.read_exact(&mut buffer1).await.into_error()?;
+        let mut output_configs = output_device
+            .supported_output_configs()
+            .into_error()?
+            .collect::<Vec<_>>();
 
-            if buffer1 != [0; 4] {
-                fail!(AppError::Raw("broken data"));
+        output_configs.sort_by_key(config_sort_key);
+        let output_config = output_configs.first().into_error()?.with_max_sample_rate();
+        trace!(?output_config);
+
+        let output_stereo = match output_config.channels() {
+            1 => false,
+            2 => true,
+            _ => fail!(MiscError::Raw(
+                "no output configuration which is stereo or mono"
+            )),
+        };
+
+        trace!(output_stereo);
+        let output_sample_rate = output_config.sample_rate().0;
+        trace!(output_sample_rate);
+        let output_ring0 = Arc::new(RingBuffer::new(output_sample_rate as usize / 10));
+        let output_ring1 = output_ring0.clone();
+
+        let recv_handle = runtime_handle1.spawn(async move {
+            let mut buffer0 = Vec::new();
+            let mut decoder = Decoder::new(sample_rate, channels)?;
+            let mut resampler = Resampler::new(channels, sample_rate, output_sample_rate, quality)?;
+            debug!("start play loop");
+
+            while !*exit2.read().await {
+                debug!("receive opus packed");
+                let mut buffer1 = [0; 4];
+                recv_stream.read_exact(&mut buffer1).await.into_error()?;
+                decoder.input().resize(u32::from_le_bytes(buffer1) as _, 0);
+                recv_stream.read_exact(decoder.input()).await.into_error()?;
+                recv_stream.read_exact(&mut buffer1).await.into_error()?;
+
+                if buffer1 != [0; 4] {
+                    fail!(MiscError::Raw("broken data"));
+                }
+
+                decoder.decode(max_frame_size)?;
+                buffer0.extend_from_slice(decoder.output());
+                let (n, buffer2) = resampler.resample(&buffer0)?;
+                buffer0.drain(0..(n * channels) as _);
+                output_ring0.extend(buffer2.chunks(2).map(|frame| [frame[0], frame[1]]));
+                debug!(used = output_ring0.used());
             }
 
-            decoder.decode(max_frame_size)?;
-            buffer0.extend_from_slice(decoder.output());
-            let (n, buffer2) = resampler.resample(&buffer0)?;
-            buffer0.drain(0..(n * channels) as _);
-            output_ring0.extend(buffer2.chunks(2).map(|frame| [frame[0], frame[1]]));
-            debug!(used = output_ring0.used());
-        }
+            debug!("exit play loop");
+            Result::<_, E>::Ok(())
+        });
 
-        debug!("exit play loop");
+        debug!("build output audio stream");
+
+        let output_stream = ThreadBound::new(
+            output_device
+                .build_output_stream_raw(
+                    &output_config.config(),
+                    output_config.sample_format(),
+                    move |data, _| match data.sample_format() {
+                        SampleFormat::I8 => {
+                            frames_to_data::<i8>(data, output_ring1.drain(), output_stereo)
+                        },
+                        SampleFormat::I16 => {
+                            frames_to_data::<i16>(data, output_ring1.drain(), output_stereo)
+                        },
+                        SampleFormat::I24 => {
+                            frames_to_data::<I24>(data, output_ring1.drain(), output_stereo)
+                        },
+                        SampleFormat::I32 => {
+                            frames_to_data::<i32>(data, output_ring1.drain(), output_stereo)
+                        },
+                        SampleFormat::I64 => {
+                            frames_to_data::<i64>(data, output_ring1.drain(), output_stereo)
+                        },
+                        SampleFormat::U8 => {
+                            frames_to_data::<u8>(data, output_ring1.drain(), output_stereo)
+                        },
+                        SampleFormat::U16 => {
+                            frames_to_data::<u16>(data, output_ring1.drain(), output_stereo)
+                        },
+                        SampleFormat::U32 => {
+                            frames_to_data::<u32>(data, output_ring1.drain(), output_stereo)
+                        },
+                        SampleFormat::U64 => {
+                            frames_to_data::<u64>(data, output_ring1.drain(), output_stereo)
+                        },
+                        SampleFormat::F32 => {
+                            frames_to_data::<f32>(data, output_ring1.drain(), output_stereo)
+                        },
+                        SampleFormat::F64 => {
+                            frames_to_data::<f64>(data, output_ring1.drain(), output_stereo)
+                        },
+                        _ => (),
+                    },
+                    |error| error!(error = &error as &dyn Error),
+                    Option::None,
+                )
+                .into_error()?,
+        );
+
+        output_stream.play().into_error()?;
+        runtime_handle1.block_on(recv_handle).into_error()??;
         Result::<_, E>::Ok(())
     });
-
-    debug!("build input audio stream");
-
-    let input_stream = input_device
-        .build_input_stream_raw(
-            &input_config.config(),
-            input_config.sample_format(),
-            move |data, _| match data.sample_format() {
-                SampleFormat::I8 => input_ring1.extend(data_to_frames::<i8>(data, input_stereo)),
-                SampleFormat::I16 => input_ring1.extend(data_to_frames::<i16>(data, input_stereo)),
-                SampleFormat::I24 => input_ring1.extend(data_to_frames::<I24>(data, input_stereo)),
-                SampleFormat::I32 => input_ring1.extend(data_to_frames::<i32>(data, input_stereo)),
-                SampleFormat::I64 => input_ring1.extend(data_to_frames::<i64>(data, input_stereo)),
-                SampleFormat::U8 => input_ring1.extend(data_to_frames::<u8>(data, input_stereo)),
-                SampleFormat::U16 => input_ring1.extend(data_to_frames::<u16>(data, input_stereo)),
-                SampleFormat::U32 => input_ring1.extend(data_to_frames::<u32>(data, input_stereo)),
-                SampleFormat::U64 => input_ring1.extend(data_to_frames::<u64>(data, input_stereo)),
-                SampleFormat::F32 => input_ring1.extend(data_to_frames::<f32>(data, input_stereo)),
-                SampleFormat::F64 => input_ring1.extend(data_to_frames::<f64>(data, input_stereo)),
-                _ => (),
-            },
-            |error| error!(error = &error as &dyn Error),
-            Option::None,
-        )
-        .into_error()?;
-
-    input_stream.play().into_error()?;
-    debug!("build output audio stream");
-
-    let output_stream = output_device
-        .build_output_stream_raw(
-            &output_config.config(),
-            output_config.sample_format(),
-            move |data, _| match data.sample_format() {
-                SampleFormat::I8 => frames_to_data::<i8>(data, output_ring1.drain(), output_stereo),
-                SampleFormat::I16 => {
-                    frames_to_data::<i16>(data, output_ring1.drain(), output_stereo)
-                },
-                SampleFormat::I24 => {
-                    frames_to_data::<I24>(data, output_ring1.drain(), output_stereo)
-                },
-                SampleFormat::I32 => {
-                    frames_to_data::<i32>(data, output_ring1.drain(), output_stereo)
-                },
-                SampleFormat::I64 => {
-                    frames_to_data::<i64>(data, output_ring1.drain(), output_stereo)
-                },
-                SampleFormat::U8 => frames_to_data::<u8>(data, output_ring1.drain(), output_stereo),
-                SampleFormat::U16 => {
-                    frames_to_data::<u16>(data, output_ring1.drain(), output_stereo)
-                },
-                SampleFormat::U32 => {
-                    frames_to_data::<u32>(data, output_ring1.drain(), output_stereo)
-                },
-                SampleFormat::U64 => {
-                    frames_to_data::<u64>(data, output_ring1.drain(), output_stereo)
-                },
-                SampleFormat::F32 => {
-                    frames_to_data::<f32>(data, output_ring1.drain(), output_stereo)
-                },
-                SampleFormat::F64 => {
-                    frames_to_data::<f64>(data, output_ring1.drain(), output_stereo)
-                },
-                _ => (),
-            },
-            |error| error!(error = &error as &dyn Error),
-            Option::None,
-        )
-        .into_error()?;
-
-    output_stream.play().into_error()?;
 
     runtime.block_on(async {
         println!("Let's talk!");
@@ -500,7 +545,7 @@ async fn bind<E: Source>(secret: Option<SecretKey>, alpn: &[u8]) -> Result<Endpo
         .discovery_n0()
         .bind()
         .await
-        .map_err(|error| AppError::Boxed(error.into_boxed_dyn_error()))
+        .map_err(|error| MiscError::Boxed(error.into_boxed_dyn_error()))
         .into_error()?;
 
     trace!(?endpoint);
@@ -587,6 +632,28 @@ enum Command {
     Join {
         node_id: NodeId,
     },
+}
+
+struct ThreadBound<T> {
+    value: T,
+    _phantom: PhantomData<*const ()>,
+}
+
+impl<T> ThreadBound<T> {
+    fn new(value: T) -> Self {
+        Self {
+            value,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T> Deref for ThreadBound<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
 }
 
 struct RingBuffer {
@@ -729,7 +796,7 @@ impl Encoder {
     #[instrument(skip(self))]
     fn encode<E: Source>(&mut self, frame_size: usize, max_packet_size: usize) -> Result<(), E> {
         if !self.ready(frame_size) {
-            fail!(AppError::Raw("not enough samples"));
+            fail!(MiscError::Raw("not enough samples"));
         }
 
         self.output.resize(max_packet_size, 0);
@@ -828,7 +895,7 @@ fn handle_opus_error<E: Source>(error: c_int) -> Result<(), E> {
             .to_str()
             .into_error()?;
 
-        fail!(AppError::Opus(error));
+        fail!(MiscError::Opus(error));
     }
 
     Result::Ok(())
@@ -841,21 +908,21 @@ fn handle_speex_error<E: Source>(error: c_int) -> Result<(), E> {
             .to_str()
             .into_error()?;
 
-        fail!(AppError::Speex(error));
+        fail!(MiscError::Speex(error));
     }
 
     Result::Ok(())
 }
 
 #[derive(Debug)]
-enum AppError {
+enum MiscError {
     Raw(&'static str),
     Boxed(Box<dyn Error + Send + Sync + 'static>),
     Opus(&'static str),
     Speex(&'static str),
 }
 
-impl Display for AppError {
+impl Display for MiscError {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match self {
             Self::Raw(message) => write!(f, "{message}"),
@@ -866,4 +933,4 @@ impl Display for AppError {
     }
 }
 
-impl Error for AppError {}
+impl Error for MiscError {}
