@@ -1,8 +1,8 @@
 #[allow(deprecated)]
-use ::bindgen::CargoCallbacks;
+use bindgen::CargoCallbacks;
 use {
-    ::bindgen::builder,
-    ::std::env::var,
+    bindgen::builder,
+    std::env::var,
 };
 
 fn main() {
@@ -22,14 +22,13 @@ fn main() {
     let triplet = format!("{arch}-{os}");
 
     builder()
-        .raw_line("#![allow(dead_code, non_camel_case_types)]")
         .header(format!(
             "../../vcpkg_installed/{triplet}/include/opus/opus.h"
         ))
         .parse_callbacks(Box::new(CargoCallbacks::new()))
         .generate()
         .expect("failed to generate bindgen")
-        .write_to_file("src/lib.rs")
+        .write_to_file(format!("{}/lib.rs", var("OUT_DIR").unwrap()))
         .expect("failed to write to file");
 
     println!("cargo:rustc-link-search=native=vcpkg_installed/{triplet}/lib");
