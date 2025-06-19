@@ -38,7 +38,9 @@ fn main() {
 
     builder()
         .raw_line("#![allow(dead_code, non_camel_case_types)]")
-        .header(format!("vcpkg_installed/{triplet}/include/opus/opus.h"))
+        .header(format!(
+            "../../vcpkg_installed/{triplet}/include/opus/opus.h"
+        ))
         .generate()
         .expect("failed to generate bindgen")
         .write_to_file("src/opus.rs")
@@ -47,7 +49,7 @@ fn main() {
     builder()
         .raw_line("#![allow(dead_code, non_camel_case_types)]")
         .header(format!(
-            "vcpkg_installed/{triplet}/include/speex/speex_resampler.h"
+            "../../vcpkg_installed/{triplet}/include/speex/speex_resampler.h"
         ))
         .generate()
         .expect("failed to generate bindgen")
