@@ -5,8 +5,9 @@ import threading
 import queue
 
 
+process = None
+
 def main():
-    process = None
     output_queue = queue.Queue()
 
     def join():
@@ -14,7 +15,7 @@ def main():
         node_id = id_entry.get()
         if node_id and not process:
             process = subprocess.Popen(
-                ["target/debug/utokyo-FEN-EE3901E1-i3", "join", node_id]
+                ["target/debug/cli", "join", node_id]
             )
             status_label.config(text=f"connecting to Node {node_id}")
 
@@ -33,7 +34,7 @@ def main():
     def run_host_command():
         """バックグラウンドスレッドでホストコマンドを実行し、出力をキューに入れる"""
         global process
-        host_command = ["target/debug/utokyo-FEN-EE3901E1-i3", "host"]
+        host_command = ["target/debug/cli", "host"]
 
         try:
             process = subprocess.Popen(
