@@ -32,11 +32,10 @@ use {
         Data,
         FromSample,
         SampleFormat,
+        SampleRate,
         SizedSample,
-        platform::{
-            Host,
-            default_host,
-        },
+        SupportedStreamConfigRange,
+        platform::default_host,
         traits::{
             DeviceTrait,
             HostTrait,
@@ -60,11 +59,7 @@ use {
     ::iroh::{
         NodeId,
         SecretKey,
-        endpoint::{
-            Endpoint,
-            RecvStream,
-            SendStream,
-        },
+        endpoint::Endpoint,
     },
     ::rancor::{
         BoxedError,
@@ -95,14 +90,11 @@ use {
         sync::Arc,
     },
     ::tokio::{
+        runtime::Runtime,
         signal::ctrl_c,
         sync::{
             Notify,
             RwLock,
-        },
-        task::{
-            block_in_place,
-            spawn,
         },
     },
     ::tracing::{
@@ -128,11 +120,10 @@ use {
     },
 };
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     match init::<BoxedError>() {
         Result::Ok(result) => match result {
-            Result::Ok((command, _guard)) => match run::<BoxedError>(command).await {
+            Result::Ok((command, _guard)) => match run::<BoxedError>(command) {
                 Result::Ok(()) => ExitCode::SUCCESS,
                 Result::Err(error) => {
                     error!(error = &error as &dyn Error);
@@ -182,60 +173,310 @@ fn init<E: Source>() -> Result<Result<(Command, WorkerGuard), ExitCode>, E> {
 }
 
 #[instrument(skip(command))]
-async fn run<E: Source>(command: Command) -> Result<(), E> {
+fn run<E: Source>(command: Command) -> Result<(), E> {
     let alpn = b"/eeic-i3/31";
 
-    match command {
+    let (runtime, endpoint, mut send_stream, mut recv_stream) = match command {
         Command::Generate => {
             println!("Your SECRET: {}", generate());
+            return Result::Ok(());
         },
         Command::Host {
             secret,
         } => {
-            let endpoint = bind(secret, alpn).await?;
-            debug!("accept connection");
+            let runtime = Runtime::new().into_error()?;
 
-            let connection = loop {
-                match endpoint.accept().await.into_error()?.accept() {
-                    Result::Ok(connecting) => break connecting.await.into_error()?,
-                    Result::Err(error) => {
-                        debug!(error = &error as &dyn Error);
-                        continue;
-                    },
-                }
-            };
+            let (endpoint, (send_stream, recv_stream)) = runtime.block_on(async {
+                let endpoint = bind(secret, alpn).await?;
+                debug!("accept connection");
 
-            trace!(?connection);
-            info!("accepted connection");
-            debug!("accept bi stream");
-            let (send_stream, recv_stream) = connection.accept_bi().await.into_error()?;
-            commute(send_stream, recv_stream).await?;
-            debug!("close endpoint");
-            endpoint.close().await;
+                let connection = loop {
+                    match endpoint.accept().await.into_error()?.accept() {
+                        Result::Ok(connecting) => break connecting.await.into_error()?,
+                        Result::Err(error) => {
+                            debug!(error = &error as &dyn Error);
+                            continue;
+                        },
+                    }
+                };
+
+                trace!(?connection);
+                info!("accepted connection");
+                debug!("accept bi stream");
+                let streams = connection.accept_bi().await.into_error()?;
+                debug!("accepted bi stream");
+                Result::Ok((endpoint, streams))
+            })?;
+
+            (runtime, endpoint, send_stream, recv_stream)
         },
         Command::Join {
             node_id,
         } => {
-            let endpoint = bind(Option::None, alpn).await?;
-            info!(%node_id, "connect to peer");
+            let runtime = Runtime::new().into_error()?;
 
-            let connection = endpoint
-                .connect(node_id, alpn)
-                .await
-                .map_err(|error| AppError::Boxed(error.into_boxed_dyn_error()))
-                .into_error()?;
+            let (endpoint, (send_stream, recv_stream)) = runtime.block_on(async {
+                let endpoint = bind(Option::None, alpn).await?;
+                debug!(%node_id, "connect to peer");
 
-            trace!(?connection);
-            info!("connected to peer");
-            debug!("open bi stream");
-            let (send_stream, recv_stream) = connection.open_bi().await.into_error()?;
-            commute(send_stream, recv_stream).await?;
-            debug!("close endpoint");
-            endpoint.close().await;
+                let connection = endpoint
+                    .connect(node_id, alpn)
+                    .await
+                    .map_err(|error| AppError::Boxed(error.into_boxed_dyn_error()))
+                    .into_error()?;
+
+                trace!(?connection);
+                debug!("connected to peer");
+                debug!("open bi stream");
+                let streams = connection.open_bi().await.into_error()?;
+                debug!("opened bi stream");
+                Result::Ok((endpoint, streams))
+            })?;
+
+            (runtime, endpoint, send_stream, recv_stream)
         },
-    }
+    };
+
+    debug!("get default audio host");
+    let host = Arc::new(default_host());
+    trace!(host = ?host.id());
+    debug!("get input audio device");
+    let input_device = host.default_input_device().into_error()?;
+    trace!(input_device = input_device.name().into_error()?);
+
+    let mut input_configs = input_device
+        .supported_input_configs()
+        .into_error()?
+        .collect::<Vec<_>>();
+
+    input_configs.sort_by_key(config_sort_key);
+    let input_config = input_configs.first().into_error()?.with_max_sample_rate();
+    trace!(?input_config);
+
+    let input_stereo = match input_config.channels() {
+        1 => false,
+        2 => true,
+        _ => fail!(AppError::Raw(
+            "no input configuration which is stereo or mono"
+        )),
+    };
+
+    trace!(input_stereo);
+    let input_sample_rate = input_config.sample_rate().0;
+    trace!(input_sample_rate);
+    let input_ring0 = Arc::new(RingBuffer::new(input_sample_rate as usize / 10));
+    let input_ring1 = input_ring0.clone();
+
+    debug!("get output audio device");
+    let output_device = host.default_output_device().into_error()?;
+    trace!(output_device = output_device.name().into_error()?);
+
+    let mut output_configs = output_device
+        .supported_output_configs()
+        .into_error()?
+        .collect::<Vec<_>>();
+
+    output_configs.sort_by_key(config_sort_key);
+    let output_config = output_configs.first().into_error()?.with_max_sample_rate();
+    trace!(?output_config);
+
+    let output_stereo = match output_config.channels() {
+        1 => false,
+        2 => true,
+        _ => fail!(AppError::Raw(
+            "no output configuration which is stereo or mono"
+        )),
+    };
+
+    trace!(output_stereo);
+    let output_sample_rate = output_config.sample_rate().0;
+    trace!(output_sample_rate);
+    let output_ring0 = Arc::new(RingBuffer::new(output_sample_rate as usize / 10));
+    let output_ring1 = output_ring0.clone();
+    let exit0 = Arc::new(RwLock::new(false));
+    let exit1 = exit0.clone();
+    let exit2 = exit1.clone();
+
+    runtime.spawn(async move {
+        if let Result::Err(error) = ctrl_c().await {
+            error!(error = &error as &dyn Error);
+        }
+
+        *exit0.write().await = true;
+    });
+
+    debug!("start communication");
+    let sample_rate = 48000;
+    let channels = 2;
+    let frame_size = sample_rate as usize * 20 / 1000;
+    let max_frame_size = sample_rate as usize * 120 / 1000;
+    let max_packet_size = 4000;
+    let quality = 7;
+
+    let record_handle = runtime.spawn(async move {
+        let mut buffer = Vec::new();
+        let mut resampler = Resampler::new(channels, input_sample_rate, sample_rate, quality)?;
+        let mut encoder = Encoder::new(sample_rate, channels)?;
+        debug!("start record loop");
+
+        while !*exit1.read().await {
+            input_ring0.wait().await;
+            debug!(used = input_ring0.used());
+            buffer.extend(input_ring0.drain().flatten());
+            let (n, buffer3) = resampler.resample(&buffer)?;
+            buffer.drain(0..(n * channels) as _);
+            encoder.input().extend(buffer3);
+
+            while encoder.ready(frame_size) {
+                encoder.encode(frame_size, max_packet_size)?;
+
+                if !encoder.output.is_empty() {
+                    debug!("send opus packet");
+                    let len = (encoder.output().len() as u32).to_le_bytes();
+                    send_stream.write_all(&len).await.into_error()?;
+                    send_stream.write_all(encoder.output()).await.into_error()?;
+                    send_stream.write_all(&[0; 4]).await.into_error()?;
+                }
+            }
+        }
+
+        debug!("exit record loop");
+        send_stream.finish().into_error()?;
+        send_stream.stopped().await.into_error()?;
+        Result::<_, E>::Ok(())
+    });
+
+    let play_handle = runtime.spawn(async move {
+        let mut buffer0 = Vec::new();
+        let mut decoder = Decoder::new(sample_rate, channels)?;
+        let mut resampler = Resampler::new(channels, sample_rate, output_sample_rate, quality)?;
+        debug!("start play loop");
+
+        while !*exit2.read().await {
+            debug!("receive opus packed");
+            let mut buffer1 = [0; 4];
+            recv_stream.read_exact(&mut buffer1).await.into_error()?;
+            decoder.input().resize(u32::from_le_bytes(buffer1) as _, 0);
+            recv_stream.read_exact(decoder.input()).await.into_error()?;
+            recv_stream.read_exact(&mut buffer1).await.into_error()?;
+
+            if buffer1 != [0; 4] {
+                fail!(AppError::Raw("broken data"));
+            }
+
+            decoder.decode(max_frame_size)?;
+            buffer0.extend_from_slice(decoder.output());
+            let (n, buffer2) = resampler.resample(&buffer0)?;
+            buffer0.drain(0..(n * channels) as _);
+            output_ring0.extend(buffer2.chunks(2).map(|frame| [frame[0], frame[1]]));
+            debug!(used = output_ring0.used());
+        }
+
+        debug!("exit play loop");
+        Result::<_, E>::Ok(())
+    });
+
+    debug!("build input audio stream");
+
+    let input_stream = input_device
+        .build_input_stream_raw(
+            &input_config.config(),
+            input_config.sample_format(),
+            move |data, _| match data.sample_format() {
+                SampleFormat::I8 => input_ring1.extend(data_to_frames::<i8>(data, input_stereo)),
+                SampleFormat::I16 => input_ring1.extend(data_to_frames::<i16>(data, input_stereo)),
+                SampleFormat::I24 => input_ring1.extend(data_to_frames::<I24>(data, input_stereo)),
+                SampleFormat::I32 => input_ring1.extend(data_to_frames::<i32>(data, input_stereo)),
+                SampleFormat::I64 => input_ring1.extend(data_to_frames::<i64>(data, input_stereo)),
+                SampleFormat::U8 => input_ring1.extend(data_to_frames::<u8>(data, input_stereo)),
+                SampleFormat::U16 => input_ring1.extend(data_to_frames::<u16>(data, input_stereo)),
+                SampleFormat::U32 => input_ring1.extend(data_to_frames::<u32>(data, input_stereo)),
+                SampleFormat::U64 => input_ring1.extend(data_to_frames::<u64>(data, input_stereo)),
+                SampleFormat::F32 => input_ring1.extend(data_to_frames::<f32>(data, input_stereo)),
+                SampleFormat::F64 => input_ring1.extend(data_to_frames::<f64>(data, input_stereo)),
+                _ => (),
+            },
+            |error| error!(error = &error as &dyn Error),
+            Option::None,
+        )
+        .into_error()?;
+
+    input_stream.play().into_error()?;
+    debug!("build output audio stream");
+
+    let output_stream = output_device
+        .build_output_stream_raw(
+            &output_config.config(),
+            output_config.sample_format(),
+            move |data, _| match data.sample_format() {
+                SampleFormat::I8 => frames_to_data::<i8>(data, output_ring1.drain(), output_stereo),
+                SampleFormat::I16 => {
+                    frames_to_data::<i16>(data, output_ring1.drain(), output_stereo)
+                },
+                SampleFormat::I24 => {
+                    frames_to_data::<I24>(data, output_ring1.drain(), output_stereo)
+                },
+                SampleFormat::I32 => {
+                    frames_to_data::<i32>(data, output_ring1.drain(), output_stereo)
+                },
+                SampleFormat::I64 => {
+                    frames_to_data::<i64>(data, output_ring1.drain(), output_stereo)
+                },
+                SampleFormat::U8 => frames_to_data::<u8>(data, output_ring1.drain(), output_stereo),
+                SampleFormat::U16 => {
+                    frames_to_data::<u16>(data, output_ring1.drain(), output_stereo)
+                },
+                SampleFormat::U32 => {
+                    frames_to_data::<u32>(data, output_ring1.drain(), output_stereo)
+                },
+                SampleFormat::U64 => {
+                    frames_to_data::<u64>(data, output_ring1.drain(), output_stereo)
+                },
+                SampleFormat::F32 => {
+                    frames_to_data::<f32>(data, output_ring1.drain(), output_stereo)
+                },
+                SampleFormat::F64 => {
+                    frames_to_data::<f64>(data, output_ring1.drain(), output_stereo)
+                },
+                _ => (),
+            },
+            |error| error!(error = &error as &dyn Error),
+            Option::None,
+        )
+        .into_error()?;
+
+    output_stream.play().into_error()?;
+
+    runtime.block_on(async {
+        println!("Let's talk!");
+
+        if let Result::Err(error) = record_handle.await.into_error()? {
+            warn!(error = &error as &dyn Error);
+        }
+
+        if let Result::Err(error) = play_handle.await.into_error()? {
+            warn!(error = &error as &dyn Error);
+        }
+
+        println!("Bye.");
+        endpoint.close().await;
+        Result::<_, E>::Ok(())
+    })?;
 
     Result::Ok(())
+}
+
+fn config_sort_key(config: &SupportedStreamConfigRange) -> Reverse<(u8, SampleRate, usize, bool)> {
+    Reverse((
+        match config.channels() {
+            1 => 1,
+            2 => 2,
+            _ => 0,
+        },
+        config.max_sample_rate(),
+        config.sample_format().sample_size(),
+        config.sample_format().is_float(),
+    ))
 }
 
 #[instrument]
@@ -252,9 +493,9 @@ async fn bind<E: Source>(secret: Option<SecretKey>, alpn: &[u8]) -> Result<Endpo
         Option::None => generate(),
     };
 
-    info!(%secret, "use secret key");
+    trace!(%secret);
     let node_id = secret.public();
-    info!(%node_id, "bind to node id");
+    trace!(%node_id);
     println!("Your Node ID: {node_id}");
     debug!("open endpoint");
 
@@ -269,183 +510,6 @@ async fn bind<E: Source>(secret: Option<SecretKey>, alpn: &[u8]) -> Result<Endpo
 
     trace!(?endpoint);
     Result::Ok(endpoint)
-}
-
-#[instrument]
-async fn commute<E: Source>(send_stream: SendStream, recv_stream: RecvStream) -> Result<(), E> {
-    debug!("start communication");
-    let host = Arc::new(default_host());
-    trace!(host = ?host.id());
-    let sample_rate = 48000;
-    let channels = 2;
-    let frame_size = sample_rate as usize * 20 / 1000;
-    let max_frame_size = sample_rate as usize * 120 / 1000;
-    let max_packet_size = 4000;
-    let quality = 7;
-    let exit = Arc::new(RwLock::new(false));
-
-    let play_handle = spawn(play::<E>(
-        recv_stream,
-        host.clone(),
-        sample_rate,
-        channels,
-        max_frame_size,
-        max_packet_size,
-        quality,
-        exit.clone(),
-    ));
-
-    let record_handle = spawn(record::<E>(
-        send_stream,
-        host,
-        sample_rate,
-        channels,
-        frame_size,
-        max_packet_size,
-        quality,
-        exit.clone(),
-    ));
-
-    spawn(async move {
-        if let Result::Err(error) = ctrl_c().await {
-            error!(error = &error as &dyn Error);
-        }
-
-        *exit.write().await = true;
-    });
-
-    println!("Let's talk!");
-
-    if let Result::Err(error) = record_handle.await.into_error()? {
-        warn!(error = &error as &dyn Error);
-    }
-
-    if let Result::Err(error) = play_handle.await.into_error()? {
-        warn!(error = &error as &dyn Error);
-    }
-
-    println!("Bye.");
-    Result::Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-#[instrument(skip(send_stream, host))]
-async fn record<E: Source>(
-    mut send_stream: SendStream,
-    host: Arc<Host>,
-    sample_rate: u32,
-    channels: u32,
-    frame_size: usize,
-    max_packet_size: usize,
-    quality: u32,
-    exit: Arc<RwLock<bool>>,
-) -> Result<(), E> {
-    debug!("get input device");
-    let device = host.default_input_device().into_error()?;
-    trace!(device = device.name().into_error()?);
-
-    let mut configs = device
-        .supported_input_configs()
-        .into_error()?
-        .collect::<Vec<_>>();
-
-    configs.sort_by_key(|config| {
-        Reverse((
-            match config.channels() {
-                1 => 1,
-                2 => 2,
-                _ => 0,
-            },
-            config.max_sample_rate(),
-            config.sample_format().sample_size(),
-            config.sample_format().is_float(),
-        ))
-    });
-
-    let config = configs.first().into_error()?.with_max_sample_rate();
-    trace!(?config);
-
-    let stereo = match config.channels() {
-        1 => false,
-        2 => true,
-        _ => fail!(AppError::Raw(
-            "no input configuration which is stereo or mono"
-        )),
-    };
-
-    trace!(stereo);
-    let raw_sample_rate = config.sample_rate().0;
-    trace!(raw_sample_rate);
-    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as usize / 10));
-    let buffer1 = buffer0.clone();
-    debug!("build input stream");
-
-    let _input_stream = block_in_place(move || {
-        let input_stream = device
-            .build_input_stream_raw(
-                &config.config(),
-                config.sample_format(),
-                move |data, _| match data.sample_format() {
-                    SampleFormat::I8 => buffer0.extend(data_to_frames::<i8>(data, stereo)),
-                    SampleFormat::I16 => buffer0.extend(data_to_frames::<i16>(data, stereo)),
-                    SampleFormat::I24 => buffer0.extend(data_to_frames::<I24>(data, stereo)),
-                    SampleFormat::I32 => buffer0.extend(data_to_frames::<i32>(data, stereo)),
-                    SampleFormat::I64 => buffer0.extend(data_to_frames::<i64>(data, stereo)),
-                    SampleFormat::U8 => buffer0.extend(data_to_frames::<u8>(data, stereo)),
-                    SampleFormat::U16 => buffer0.extend(data_to_frames::<u16>(data, stereo)),
-                    SampleFormat::U32 => buffer0.extend(data_to_frames::<u32>(data, stereo)),
-                    SampleFormat::U64 => buffer0.extend(data_to_frames::<u64>(data, stereo)),
-                    SampleFormat::F32 => buffer0.extend(data_to_frames::<f32>(data, stereo)),
-                    SampleFormat::F64 => buffer0.extend(data_to_frames::<f64>(data, stereo)),
-                    _ => (),
-                },
-                |error| error!(error = &error as &dyn Error),
-                Option::None,
-            )
-            .into_error()?;
-
-        input_stream.play().into_error()?;
-
-        Result::<_, E>::Ok('block: {
-            #[cfg(any(target_os = "macos", target_os = "ios"))]
-            break 'block ();
-
-            #[cfg(not(all(target_os = "macos", target_os = "ios")))]
-            break 'block input_stream;
-        })
-    })
-    .into_error()?;
-
-    let mut buffer2 = Vec::new();
-    let mut resampler = Resampler::new(channels, raw_sample_rate, sample_rate, quality)?;
-    let mut encoder = Encoder::new(sample_rate, channels)?;
-    debug!("start record loop");
-
-    while !*exit.read().await {
-        buffer1.wait().await;
-        debug!(used = buffer1.used());
-        buffer2.extend(buffer1.drain().flatten());
-        let (n, buffer3) = resampler.resample(&buffer2)?;
-        buffer2.drain(0..(n * channels) as _);
-        encoder.input().extend(buffer3);
-
-        while encoder.ready(frame_size) {
-            encoder.encode(frame_size, max_packet_size)?;
-
-            if !encoder.output.is_empty() {
-                debug!("send opus packet");
-                let len = (encoder.output().len() as u32).to_le_bytes();
-                send_stream.write_all(&len).await.into_error()?;
-                send_stream.write_all(encoder.output()).await.into_error()?;
-                send_stream.write_all(&[0; 4]).await.into_error()?;
-            }
-        }
-    }
-
-    debug!("exit record loop");
-    send_stream.finish().into_error()?;
-    send_stream.stopped().await.into_error()?;
-    Result::Ok(())
 }
 
 #[instrument]
@@ -478,122 +542,6 @@ fn data_to_frames<S: 'static + SizedSample + ToSample<f32>>(
                 .flatten(),
         ),
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-#[instrument(skip(recv_stream, host))]
-async fn play<E: Source>(
-    mut recv_stream: RecvStream,
-    host: Arc<Host>,
-    sample_rate: u32,
-    channels: u32,
-    max_frame_size: usize,
-    max_packet_size: usize,
-    quality: u32,
-    exit: Arc<RwLock<bool>>,
-) -> Result<(), E> {
-    debug!("get output device");
-    let device = host.default_output_device().into_error()?;
-    trace!(device = device.name().into_error()?);
-
-    let mut configs = device
-        .supported_output_configs()
-        .into_error()?
-        .collect::<Vec<_>>();
-
-    configs.sort_by_key(|config| {
-        Reverse((
-            match config.channels() {
-                1 => 1,
-                2 => 2,
-                _ => 0,
-            },
-            config.max_sample_rate(),
-            config.sample_format().sample_size(),
-            config.sample_format().is_float(),
-        ))
-    });
-
-    let config = configs.first().into_error()?.with_max_sample_rate();
-    trace!(?config);
-
-    let stereo = match config.channels() {
-        1 => false,
-        2 => true,
-        _ => fail!(AppError::Raw(
-            "no output configuration which is stereo or mono"
-        )),
-    };
-
-    trace!(stereo);
-    let raw_sample_rate = config.sample_rate().0;
-    trace!(raw_sample_rate);
-    let buffer0 = Arc::new(RingBuffer::new(raw_sample_rate as usize / 10));
-    let buffer1 = buffer0.clone();
-    debug!("build output stream");
-
-    let _output_stream = block_in_place(move || {
-        let output_stream = device
-            .build_output_stream_raw(
-                &config.config(),
-                config.sample_format(),
-                move |data, _| match data.sample_format() {
-                    SampleFormat::I8 => frames_to_data::<i8>(data, buffer0.drain(), stereo),
-                    SampleFormat::I16 => frames_to_data::<i16>(data, buffer0.drain(), stereo),
-                    SampleFormat::I24 => frames_to_data::<I24>(data, buffer0.drain(), stereo),
-                    SampleFormat::I32 => frames_to_data::<i32>(data, buffer0.drain(), stereo),
-                    SampleFormat::I64 => frames_to_data::<i64>(data, buffer0.drain(), stereo),
-                    SampleFormat::U8 => frames_to_data::<u8>(data, buffer0.drain(), stereo),
-                    SampleFormat::U16 => frames_to_data::<u16>(data, buffer0.drain(), stereo),
-                    SampleFormat::U32 => frames_to_data::<u32>(data, buffer0.drain(), stereo),
-                    SampleFormat::U64 => frames_to_data::<u64>(data, buffer0.drain(), stereo),
-                    SampleFormat::F32 => frames_to_data::<f32>(data, buffer0.drain(), stereo),
-                    SampleFormat::F64 => frames_to_data::<f64>(data, buffer0.drain(), stereo),
-                    _ => (),
-                },
-                |error| error!(error = &error as &dyn Error),
-                Option::None,
-            )
-            .into_error()?;
-
-        output_stream.play().into_error()?;
-
-        Result::<_, E>::Ok('block: {
-            #[cfg(any(target_os = "macos", target_os = "ios"))]
-            break 'block ();
-
-            #[cfg(not(all(target_os = "macos", target_os = "ios")))]
-            break 'block output_stream;
-        })
-    })?;
-
-    let mut buffer2 = Vec::new();
-    let mut decoder = Decoder::new(sample_rate, channels)?;
-    let mut resampler = Resampler::new(channels, sample_rate, raw_sample_rate, quality)?;
-    debug!("start play loop");
-
-    while !*exit.read().await {
-        debug!("receive opus packed");
-        let mut buffer = [0; 4];
-        recv_stream.read_exact(&mut buffer).await.into_error()?;
-        decoder.input().resize(u32::from_le_bytes(buffer) as _, 0);
-        recv_stream.read_exact(decoder.input()).await.into_error()?;
-        recv_stream.read_exact(&mut buffer).await.into_error()?;
-
-        if buffer != [0; 4] {
-            fail!(AppError::Raw("broken data"));
-        }
-
-        decoder.decode(max_frame_size)?;
-        buffer2.extend_from_slice(decoder.output());
-        let (n, buffer3) = resampler.resample(&buffer2)?;
-        buffer2.drain(0..(n * channels) as _);
-        buffer1.extend(buffer3.chunks(2).map(|frame| [frame[0], frame[1]]));
-        debug!(used = buffer1.used());
-    }
-
-    debug!("exit play loop");
-    Result::Ok(())
 }
 
 #[instrument(skip(frames))]
