@@ -3,4 +3,4 @@ vcpkg_installed
 src/opus.rs
 src/speex.rs
 Cargo.lock
-tracing.log
+uv.lock
