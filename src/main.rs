@@ -101,8 +101,8 @@ use {
             RwLock,
         },
         task::{
+            block_in_place,
             spawn,
-            spawn_blocking,
         },
     },
     ::tracing::{
@@ -110,6 +110,7 @@ use {
         error,
         info,
         instrument,
+        level_filters::LevelFilter,
         trace,
         warn,
     },
@@ -125,8 +126,6 @@ use {
         registry::Registry,
         util::SubscriberInitExt as _,
     },
-    tokio::task::block_in_place,
-    tracing::level_filters::LevelFilter,
 };
 
 #[tokio::main]
@@ -274,7 +273,7 @@ async fn bind<E: Source>(secret: Option<SecretKey>, alpn: &[u8]) -> Result<Endpo
 
 #[instrument]
 async fn commute<E: Source>(send_stream: SendStream, recv_stream: RecvStream) -> Result<(), E> {
-    println!("Let's talk!");
+    debug!("start communication");
     let host = Arc::new(default_host());
     trace!(host = ?host.id());
     let sample_rate = 48000;
@@ -314,6 +313,8 @@ async fn commute<E: Source>(send_stream: SendStream, recv_stream: RecvStream) ->
 
         *exit.write().await = true;
     });
+
+    println!("Let's talk!");
 
     if let Result::Err(error) = record_handle.await.into_error()? {
         warn!(error = &error as &dyn Error);
@@ -379,7 +380,7 @@ async fn record<E: Source>(
     let buffer1 = buffer0.clone();
     debug!("build input stream");
 
-    block_in_place(move || {
+    let _input_stream = block_in_place(move || {
         let input_stream = device
             .build_input_stream_raw(
                 &config.config(),
@@ -404,7 +405,14 @@ async fn record<E: Source>(
             .into_error()?;
 
         input_stream.play().into_error()?;
-        Result::<_, E>::Ok(())
+
+        Result::<_, E>::Ok('block: {
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            break 'block ();
+
+            #[cfg(not(all(target_os = "macos", target_os = "ios")))]
+            break 'block input_stream;
+        })
     })
     .into_error()?;
 
@@ -524,7 +532,7 @@ async fn play<E: Source>(
     let buffer1 = buffer0.clone();
     debug!("build output stream");
 
-    block_in_place(move || {
+    let _output_stream = block_in_place(move || {
         let output_stream = device
             .build_output_stream_raw(
                 &config.config(),
@@ -549,7 +557,14 @@ async fn play<E: Source>(
             .into_error()?;
 
         output_stream.play().into_error()?;
-        Result::<_, E>::Ok(())
+
+        Result::<_, E>::Ok('block: {
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            break 'block ();
+
+            #[cfg(not(all(target_os = "macos", target_os = "ios")))]
+            break 'block output_stream;
+        })
     })?;
 
     let mut buffer2 = Vec::new();
