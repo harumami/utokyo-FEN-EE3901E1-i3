@@ -125,6 +125,7 @@ use {
         registry::Registry,
         util::SubscriberInitExt as _,
     },
+    tokio::task::block_in_place,
     tracing::level_filters::LevelFilter,
 };
 
@@ -378,33 +379,35 @@ async fn record<E: Source>(
     let buffer1 = buffer0.clone();
     debug!("build input stream");
 
-    let input_stream = spawn_blocking(move || {
-        device.build_input_stream_raw(
-            &config.config(),
-            config.sample_format(),
-            move |data, _| match data.sample_format() {
-                SampleFormat::I8 => buffer0.extend(data_to_frames::<i8>(data, stereo)),
-                SampleFormat::I16 => buffer0.extend(data_to_frames::<i16>(data, stereo)),
-                SampleFormat::I24 => buffer0.extend(data_to_frames::<I24>(data, stereo)),
-                SampleFormat::I32 => buffer0.extend(data_to_frames::<i32>(data, stereo)),
-                SampleFormat::I64 => buffer0.extend(data_to_frames::<i64>(data, stereo)),
-                SampleFormat::U8 => buffer0.extend(data_to_frames::<u8>(data, stereo)),
-                SampleFormat::U16 => buffer0.extend(data_to_frames::<u16>(data, stereo)),
-                SampleFormat::U32 => buffer0.extend(data_to_frames::<u32>(data, stereo)),
-                SampleFormat::U64 => buffer0.extend(data_to_frames::<u64>(data, stereo)),
-                SampleFormat::F32 => buffer0.extend(data_to_frames::<f32>(data, stereo)),
-                SampleFormat::F64 => buffer0.extend(data_to_frames::<f64>(data, stereo)),
-                _ => (),
-            },
-            |error| error!(error = &error as &dyn Error),
-            Option::None,
-        )
+    block_in_place(move || {
+        let input_stream = device
+            .build_input_stream_raw(
+                &config.config(),
+                config.sample_format(),
+                move |data, _| match data.sample_format() {
+                    SampleFormat::I8 => buffer0.extend(data_to_frames::<i8>(data, stereo)),
+                    SampleFormat::I16 => buffer0.extend(data_to_frames::<i16>(data, stereo)),
+                    SampleFormat::I24 => buffer0.extend(data_to_frames::<I24>(data, stereo)),
+                    SampleFormat::I32 => buffer0.extend(data_to_frames::<i32>(data, stereo)),
+                    SampleFormat::I64 => buffer0.extend(data_to_frames::<i64>(data, stereo)),
+                    SampleFormat::U8 => buffer0.extend(data_to_frames::<u8>(data, stereo)),
+                    SampleFormat::U16 => buffer0.extend(data_to_frames::<u16>(data, stereo)),
+                    SampleFormat::U32 => buffer0.extend(data_to_frames::<u32>(data, stereo)),
+                    SampleFormat::U64 => buffer0.extend(data_to_frames::<u64>(data, stereo)),
+                    SampleFormat::F32 => buffer0.extend(data_to_frames::<f32>(data, stereo)),
+                    SampleFormat::F64 => buffer0.extend(data_to_frames::<f64>(data, stereo)),
+                    _ => (),
+                },
+                |error| error!(error = &error as &dyn Error),
+                Option::None,
+            )
+            .into_error()?;
+
+        input_stream.play().into_error()?;
+        Result::<_, E>::Ok(())
     })
-    .await
-    .into_error()?
     .into_error()?;
 
-    input_stream.play().into_error()?;
     let mut buffer2 = Vec::new();
     let mut resampler = Resampler::new(channels, raw_sample_rate, sample_rate, quality)?;
     let mut encoder = Encoder::new(sample_rate, channels)?;
@@ -521,33 +524,34 @@ async fn play<E: Source>(
     let buffer1 = buffer0.clone();
     debug!("build output stream");
 
-    let output_stream = spawn_blocking(move || {
-        device.build_output_stream_raw(
-            &config.config(),
-            config.sample_format(),
-            move |data, _| match data.sample_format() {
-                SampleFormat::I8 => frames_to_data::<i8>(data, buffer0.drain(), stereo),
-                SampleFormat::I16 => frames_to_data::<i16>(data, buffer0.drain(), stereo),
-                SampleFormat::I24 => frames_to_data::<I24>(data, buffer0.drain(), stereo),
-                SampleFormat::I32 => frames_to_data::<i32>(data, buffer0.drain(), stereo),
-                SampleFormat::I64 => frames_to_data::<i64>(data, buffer0.drain(), stereo),
-                SampleFormat::U8 => frames_to_data::<u8>(data, buffer0.drain(), stereo),
-                SampleFormat::U16 => frames_to_data::<u16>(data, buffer0.drain(), stereo),
-                SampleFormat::U32 => frames_to_data::<u32>(data, buffer0.drain(), stereo),
-                SampleFormat::U64 => frames_to_data::<u64>(data, buffer0.drain(), stereo),
-                SampleFormat::F32 => frames_to_data::<f32>(data, buffer0.drain(), stereo),
-                SampleFormat::F64 => frames_to_data::<f64>(data, buffer0.drain(), stereo),
-                _ => (),
-            },
-            |error| error!(error = &error as &dyn Error),
-            Option::None,
-        )
-    })
-    .await
-    .into_error()?
-    .into_error()?;
+    block_in_place(move || {
+        let output_stream = device
+            .build_output_stream_raw(
+                &config.config(),
+                config.sample_format(),
+                move |data, _| match data.sample_format() {
+                    SampleFormat::I8 => frames_to_data::<i8>(data, buffer0.drain(), stereo),
+                    SampleFormat::I16 => frames_to_data::<i16>(data, buffer0.drain(), stereo),
+                    SampleFormat::I24 => frames_to_data::<I24>(data, buffer0.drain(), stereo),
+                    SampleFormat::I32 => frames_to_data::<i32>(data, buffer0.drain(), stereo),
+                    SampleFormat::I64 => frames_to_data::<i64>(data, buffer0.drain(), stereo),
+                    SampleFormat::U8 => frames_to_data::<u8>(data, buffer0.drain(), stereo),
+                    SampleFormat::U16 => frames_to_data::<u16>(data, buffer0.drain(), stereo),
+                    SampleFormat::U32 => frames_to_data::<u32>(data, buffer0.drain(), stereo),
+                    SampleFormat::U64 => frames_to_data::<u64>(data, buffer0.drain(), stereo),
+                    SampleFormat::F32 => frames_to_data::<f32>(data, buffer0.drain(), stereo),
+                    SampleFormat::F64 => frames_to_data::<f64>(data, buffer0.drain(), stereo),
+                    _ => (),
+                },
+                |error| error!(error = &error as &dyn Error),
+                Option::None,
+            )
+            .into_error()?;
 
-    output_stream.play().into_error()?;
+        output_stream.play().into_error()?;
+        Result::<_, E>::Ok(())
+    })?;
+
     let mut buffer2 = Vec::new();
     let mut decoder = Decoder::new(sample_rate, channels)?;
     let mut resampler = Resampler::new(channels, sample_rate, raw_sample_rate, quality)?;
@@ -874,7 +878,7 @@ fn handle_opus_error<E: Source>(error: c_int) -> Result<(), E> {
 
 #[instrument]
 fn handle_speex_error<E: Source>(error: c_int) -> Result<(), E> {
-    if error != RESAMPLER_ERR_SUCCESS {
+    if error != RESAMPLER_ERR_SUCCESS as _ {
         let error = unsafe { CStr::from_ptr(speex_resampler_strerror(error)) }
             .to_str()
             .into_error()?;
