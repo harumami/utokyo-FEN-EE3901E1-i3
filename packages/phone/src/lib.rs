@@ -343,9 +343,13 @@ impl<E0: Source> Connection<E0> {
     }
 
     pub async fn join<E1: Source>(self) -> Result<(), E1> {
+        debug!("join send handle");
+
         if let Result::Err(error) = self.send_handle.await.into_error()? {
             warn!("{error}");
         }
+
+        debug!("join recv handle");
 
         if let Result::Err(error) = self.recv_handle.await.into_error()? {
             warn!("{error}");
@@ -441,6 +445,7 @@ impl Recorder {
             .build_input_stream::<T, _, _>(
                 config,
                 move |data, _| {
+                    debug!("rec input frames: {}", data.len());
                     resampler
                         .input()
                         .extend(data.iter().copied().map(T::to_sample));
@@ -577,6 +582,7 @@ impl Player {
             .build_output_stream::<T, _, _>(
                 config,
                 move |data, _| {
+                    debug!("play output frames: {}", data.len());
                     let mut data = data.iter_mut();
 
                     loop {
@@ -590,6 +596,8 @@ impl Player {
                         }
 
                         if ring.len() == 0 {
+                            debug!("fill by equilibrium");
+
                             for data in data {
                                 *data = T::EQUILIBRIUM;
                             }
@@ -610,7 +618,11 @@ impl Player {
                         };
 
                         resampler.input().extend(samples);
-                        cursor = 0;
+
+                        match resampler.resample() {
+                            Result::Ok(()) => cursor = 0,
+                            Result::Err(error) => error!("{error}"),
+                        }
                     }
                 },
                 |error| error!("{error}"),
