@@ -139,8 +139,22 @@ fn run(command: Command) -> Result<(), BoxedError> {
         },
     };
 
-    let recorder = connection.record::<BoxedError>();
-    let player = connection.play::<BoxedError>();
+    let _recorder = match connection.record::<BoxedError>() {
+        Result::Ok(recorder) => Option::Some(recorder),
+        Result::Err(error) => {
+            info!(error = &error as &dyn Error);
+            Option::None
+        },
+    };
+
+    let _player = match connection.play::<BoxedError>() {
+        Result::Ok(player) => Option::Some(player),
+        Result::Err(error) => {
+            info!(error = &error as &dyn Error);
+            Option::None
+        },
+    };
+
     let close_handle = connection.close_handle().clone();
 
     runtime.spawn(async move {
@@ -155,15 +169,6 @@ fn run(command: Command) -> Result<(), BoxedError> {
     println!("Let's talk!");
     runtime.block_on(connection.join())?;
     println!("Bye.");
-
-    if let Result::Err(error) = recorder {
-        info!(error = &error as &dyn Error);
-    }
-
-    if let Result::Err(error) = player {
-        info!(error = &error as &dyn Error);
-    }
-
     runtime.block_on(instance.close());
     Result::Ok(())
 }

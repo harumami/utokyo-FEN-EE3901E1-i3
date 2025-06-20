@@ -80,13 +80,7 @@ use {
         marker::PhantomData,
         ops::Deref,
         str::FromStr,
-        sync::{
-            Arc,
-            atomic::{
-                Ordering,
-                fence,
-            },
-        },
+        sync::Arc,
     },
     ::tokio::{
         sync::{
@@ -243,26 +237,10 @@ pub struct Connection<E> {
 
 impl<E0> Connection<E0> {
     pub fn record<E1: Source>(&self) -> Result<Recorder, E1> {
-        fence(Ordering::Acquire);
-
-        if Arc::strong_count(&self.rec_ring) != 1 {
-            fail!(AnyError(
-                "another recorder is active, or sending task has finished".into()
-            ));
-        }
-
         Recorder::new(self.rec_ring.clone())
     }
 
     pub fn play<E1: Source>(&self) -> Result<Player, E1> {
-        fence(Ordering::Acquire);
-
-        if Arc::strong_count(&self.play_ring) != 1 {
-            fail!(AnyError(
-                "another player is active, or recving task has finished".into()
-            ));
-        }
-
         Player::new(self.play_ring.clone())
     }
 
