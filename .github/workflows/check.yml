@@ -4,6 +4,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: pacman -Syu
       - run: pacman -S vcpkg
       - run: vcpkg install
       - uses: actions/cache@v4
