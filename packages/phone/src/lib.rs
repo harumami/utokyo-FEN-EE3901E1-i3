@@ -143,7 +143,7 @@ pub struct Instance {
 
 impl Instance {
     const ALPN: &[u8] = b"/eeic-i3/31";
-    const CHANNELS: u32 = 48000;
+    const CHANNELS: u32 = 2;
     const FRAME_SIZE: usize = Self::SAMPLE_RATE as usize * 20 / 1000;
     const MAX_FRAME_SIZE: usize = Self::SAMPLE_RATE as usize * 120 / 1000;
     const MAX_PACKET_SIZE: usize = 4000;
@@ -857,8 +857,8 @@ impl OpusError {
 impl Display for OpusError {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match unsafe { CStr::from_ptr(opus_strerror(self.0)) }.to_str() {
-            Result::Ok(error) => error.fmt(f),
-            Result::Err(error) => error.fmt(f),
+            Result::Ok(error) => write!(f, "opus: {}", error),
+            Result::Err(error) => write!(f, "opus: {}", error),
         }
     }
 }
@@ -951,8 +951,8 @@ impl SpeexError {
 impl Display for SpeexError {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match unsafe { CStr::from_ptr(speex_resampler_strerror(self.0)) }.to_str() {
-            Result::Ok(error) => error.fmt(f),
-            Result::Err(error) => error.fmt(f),
+            Result::Ok(error) => write!(f, "speex: {}", error),
+            Result::Err(error) => write!(f, "speex: {}", error),
         }
     }
 }
