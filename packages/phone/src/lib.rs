@@ -22,6 +22,7 @@ use {
         ToSample,
     },
     ::iroh::{
+        KeyParsingError,
         NodeId,
         SecretKey,
         endpoint::{
@@ -78,6 +79,7 @@ use {
         iter::from_fn,
         marker::PhantomData,
         ops::Deref,
+        str::FromStr,
         sync::{
             Arc,
             atomic::{
@@ -96,8 +98,6 @@ use {
             spawn,
         },
     },
-    iroh::KeyParsingError,
-    std::str::FromStr,
 };
 
 #[derive(Clone, Debug)]
@@ -225,6 +225,10 @@ impl Instance {
         send_stream.write_all(&[0]).await.into_error()?;
         let connection = Connection::new(send_stream, recv_stream)?;
         Result::Ok(connection)
+    }
+
+    pub async fn close(&self) {
+        self.endpoint.close().await;
     }
 }
 

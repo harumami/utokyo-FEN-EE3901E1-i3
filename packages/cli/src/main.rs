@@ -25,6 +25,7 @@ use {
         signal::ctrl_c,
     },
     ::tracing::{
+        debug,
         error,
         info,
         instrument,
@@ -97,7 +98,7 @@ fn init() -> Result<Result<(Command, WorkerGuard), ExitCode>, BoxedError> {
 
 #[instrument(skip(command))]
 fn run(command: Command) -> Result<(), BoxedError> {
-    let (runtime, connection) = match command {
+    let (runtime, instance, connection) = match command {
         Command::Generate => {
             let secret = Secret::generate();
             println!("Your SECRET: {secret}");
@@ -109,7 +110,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
         } => {
             let runtime = Runtime::new().into_error()?;
 
-            let connection = runtime.block_on(async {
+            let (instance, connection) = runtime.block_on(async {
                 let instance = Instance::bind(secret).await?;
 
                 println!(
@@ -118,23 +119,23 @@ fn run(command: Command) -> Result<(), BoxedError> {
                 );
 
                 let connection = instance.accept::<BoxedError, _>().await?;
-                Result::Ok(connection)
+                Result::Ok((instance, connection))
             })?;
 
-            (runtime, connection)
+            (runtime, instance, connection)
         },
         Command::Join {
             node_id,
         } => {
             let runtime = Runtime::new().into_error()?;
 
-            let connection = runtime.block_on(async {
+            let (instance, connection) = runtime.block_on(async {
                 let instance = Instance::bind(Option::None).await?;
                 let connection = instance.connect::<BoxedError, _>(node_id).await?;
-                Result::Ok(connection)
+                Result::Ok((instance, connection))
             })?;
 
-            (runtime, connection)
+            (runtime, instance, connection)
         },
     };
 
@@ -147,6 +148,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
             error!(error = &error as &dyn Error);
         }
 
+        debug!("close stream");
         close_handle.close().await;
     });
 
@@ -162,6 +164,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
         info!(error = &error as &dyn Error);
     }
 
+    runtime.block_on(instance.close());
     Result::Ok(())
 }
 
