@@ -83,15 +83,13 @@ use {
         sync::Arc,
     },
     ::tokio::{
-        sync::{
-            Notify,
-            RwLock,
-        },
+        sync::Notify,
         task::{
             JoinHandle,
             spawn,
         },
     },
+    tokio::select,
 };
 
 #[derive(Clone, Debug)]
@@ -236,12 +234,12 @@ pub struct Connection<E> {
 }
 
 impl<E0> Connection<E0> {
-    pub fn record<E1: Source>(&self) -> Result<Recorder, E1> {
-        Recorder::new(self.rec_ring.clone())
+    pub fn record<E1: Source, E2: Source>(&self) -> Result<Recorder, E1> {
+        Recorder::new::<_, E2>(self.rec_ring.clone())
     }
 
-    pub fn play<E1: Source>(&self) -> Result<Player, E1> {
-        Player::new(self.play_ring.clone())
+    pub fn play<E1: Source, E2: Source>(&self) -> Result<Player, E1> {
+        Player::new::<_, E2>(self.play_ring.clone())
     }
 
     pub fn close_handle(&self) -> &Arc<CloseHandle> {
@@ -263,35 +261,41 @@ impl<E0: Source> Connection<E0> {
             let close_handle = close_handle.clone();
 
             spawn(async move {
-                let mut encoder =
-                    Encoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS).into_error()?;
-
+                let mut encoder = Encoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS)?;
                 debug!("start record loop");
 
-                while !close_handle.closed().await {
-                    rec_ring.wait().await;
+                let rec_loop = async {
+                    loop {
+                        rec_ring.wait().await;
 
-                    debug!(
-                        "input ring: {} of {} used: {}%",
-                        rec_ring.len(),
-                        rec_ring.capacity(),
-                        100. * rec_ring.len() as f32 / rec_ring.capacity() as f32,
-                    );
+                        debug!(
+                            "input ring: {} of {} used: {}%",
+                            rec_ring.len(),
+                            rec_ring.capacity(),
+                            100. * rec_ring.len() as f32 / rec_ring.capacity() as f32,
+                        );
 
-                    encoder.input().extend(rec_ring.drain().flatten());
+                        encoder.input().extend(rec_ring.drain().flatten());
 
-                    while encoder.ready(Instance::FRAME_SIZE) {
-                        encoder
-                            .encode(Instance::FRAME_SIZE, Instance::MAX_PACKET_SIZE)
-                            .into_error()?;
+                        while encoder.ready(Instance::FRAME_SIZE) {
+                            encoder.encode(Instance::FRAME_SIZE, Instance::MAX_PACKET_SIZE)?;
 
-                        if !encoder.output.is_empty() {
-                            debug!("send opus packet");
-                            let len = (encoder.output().len() as u32).to_le_bytes();
-                            send_stream.write_all(&len).await.into_error()?;
-                            send_stream.write_all(encoder.output()).await.into_error()?;
+                            if !encoder.output.is_empty() {
+                                debug!("send opus packet");
+                                let len = (encoder.output().len() as u32).to_le_bytes();
+                                send_stream.write_all(&len).await.into_error()?;
+                                send_stream.write_all(encoder.output()).await.into_error()?;
+                            }
                         }
                     }
+
+                    #[allow(unreachable_code)]
+                    Result::<_, E0>::Ok(())
+                };
+
+                select! {
+                    _ = rec_loop => (),
+                    _ = close_handle.wait() => (),
                 }
 
                 debug!("exit record loop");
@@ -306,26 +310,37 @@ impl<E0: Source> Connection<E0> {
             let close_handle = close_handle.clone();
 
             spawn(async move {
-                let mut decoder =
-                    Decoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS).into_error()?;
+                let mut decoder = Decoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS)?;
 
                 debug!("start play loop");
 
-                while !close_handle.closed().await {
-                    debug!("receive opus packed");
-                    let mut len = [0; 4];
-                    recv_stream.read_exact(&mut len).await.into_error()?;
-                    decoder.input().resize(u32::from_le_bytes(len) as _, 0);
-                    recv_stream.read_exact(decoder.input()).await.into_error()?;
-                    decoder.decode(Instance::MAX_FRAME_SIZE).into_error()?;
-                    play_ring.extend(decoder.output().chunks(2).map(|frame| [frame[0], frame[1]]));
+                let play_loop = async {
+                    loop {
+                        debug!("receive opus packed");
+                        let mut len = [0; 4];
+                        recv_stream.read_exact(&mut len).await.into_error()?;
+                        decoder.input().resize(u32::from_le_bytes(len) as _, 0);
+                        recv_stream.read_exact(decoder.input()).await.into_error()?;
+                        decoder.decode(Instance::MAX_FRAME_SIZE)?;
 
-                    debug!(
-                        "play ring: {} of {} used: {}%",
-                        play_ring.len(),
-                        play_ring.capacity(),
-                        100. * play_ring.len() as f32 / play_ring.capacity() as f32,
-                    );
+                        play_ring
+                            .extend(decoder.output().chunks(2).map(|frame| [frame[0], frame[1]]));
+
+                        debug!(
+                            "play ring: {} of {} used: {}%",
+                            play_ring.len(),
+                            play_ring.capacity(),
+                            100. * play_ring.len() as f32 / play_ring.capacity() as f32,
+                        );
+                    }
+
+                    #[allow(unreachable_code)]
+                    Result::<_, E0>::Ok(())
+                };
+
+                select! {
+                    _ = play_loop => (),
+                    _ = close_handle.wait() => (),
                 }
 
                 debug!("exit play loop");
@@ -366,7 +381,7 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    fn new<E: Source>(ring: Arc<RingBuffer<[f32; 2]>>) -> Result<Self, E> {
+    fn new<E0: Source, E1: Source>(ring: Arc<RingBuffer<[f32; 2]>>) -> Result<Self, E0> {
         let host = default_host();
         debug!("audio host: {:?}", host.id());
         let device = host.default_input_device().into_error()?;
@@ -394,17 +409,17 @@ impl Recorder {
         debug!("input audio config: {config:?}");
 
         let stream = match config.sample_format() {
-            SampleFormat::I8 => Self::build_stream::<i8, _>(&device, &config.config(), ring),
-            SampleFormat::I16 => Self::build_stream::<i16, _>(&device, &config.config(), ring),
-            SampleFormat::I24 => Self::build_stream::<I24, _>(&device, &config.config(), ring),
-            SampleFormat::I32 => Self::build_stream::<i32, _>(&device, &config.config(), ring),
-            SampleFormat::I64 => Self::build_stream::<i64, _>(&device, &config.config(), ring),
-            SampleFormat::U8 => Self::build_stream::<u8, _>(&device, &config.config(), ring),
-            SampleFormat::U16 => Self::build_stream::<u16, _>(&device, &config.config(), ring),
-            SampleFormat::U32 => Self::build_stream::<u32, _>(&device, &config.config(), ring),
-            SampleFormat::U64 => Self::build_stream::<u64, _>(&device, &config.config(), ring),
-            SampleFormat::F32 => Self::build_stream::<f32, _>(&device, &config.config(), ring),
-            SampleFormat::F64 => Self::build_stream::<f64, _>(&device, &config.config(), ring),
+            SampleFormat::I8 => Self::build_stream::<i8, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I16 => Self::build_stream::<i16, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I24 => Self::build_stream::<I24, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I32 => Self::build_stream::<i32, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I64 => Self::build_stream::<i64, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U8 => Self::build_stream::<u8, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U16 => Self::build_stream::<u16, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U32 => Self::build_stream::<u32, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U64 => Self::build_stream::<u64, _, E1>(&device, &config.config(), ring),
+            SampleFormat::F32 => Self::build_stream::<f32, _, E1>(&device, &config.config(), ring),
+            SampleFormat::F64 => Self::build_stream::<f64, _, E1>(&device, &config.config(), ring),
             format => fail!(AnyError(format!("unknown format: {format}").into())),
         }?;
 
@@ -417,11 +432,11 @@ impl Recorder {
         })
     }
 
-    fn build_stream<T: SizedSample + ToSample<f32>, E: Source>(
+    fn build_stream<T: SizedSample + ToSample<f32>, E0: Source, E1: Source>(
         device: &Device,
         config: &StreamConfig,
         ring: Arc<RingBuffer<[f32; 2]>>,
-    ) -> Result<ThreadBound<Stream>, E> {
+    ) -> Result<ThreadBound<Stream>, E0> {
         debug!("build input audio stream");
 
         let stereo = match config.channels {
@@ -438,8 +453,7 @@ impl Recorder {
             config.sample_rate.0,
             Instance::SAMPLE_RATE,
             Instance::RESAMPLE_QUALITY,
-        )
-        .into_error()?;
+        )?;
 
         let stream = device
             .build_input_stream::<T, _, _>(
@@ -450,7 +464,7 @@ impl Recorder {
                         .input()
                         .extend(data.iter().copied().map(T::to_sample));
 
-                    if let Result::Err(error) = resampler.resample() {
+                    if let Result::Err(error) = resampler.resample::<E1>() {
                         error!("{error}");
                         return;
                     }
@@ -499,7 +513,7 @@ pub struct Player {
 }
 
 impl Player {
-    fn new<E: Source>(ring: Arc<RingBuffer<[f32; 2]>>) -> Result<Self, E> {
+    fn new<E0: Source, E1: Source>(ring: Arc<RingBuffer<[f32; 2]>>) -> Result<Self, E0> {
         let host = default_host();
         debug!("audio host: {:?}", host.id());
         let device = host.default_output_device().into_error()?;
@@ -527,17 +541,17 @@ impl Player {
         debug!("output audio config: {config:?}");
 
         let stream = match config.sample_format() {
-            SampleFormat::I8 => Self::build_stream::<i8, _>(&device, &config.config(), ring),
-            SampleFormat::I16 => Self::build_stream::<i16, _>(&device, &config.config(), ring),
-            SampleFormat::I24 => Self::build_stream::<I24, _>(&device, &config.config(), ring),
-            SampleFormat::I32 => Self::build_stream::<i32, _>(&device, &config.config(), ring),
-            SampleFormat::I64 => Self::build_stream::<i64, _>(&device, &config.config(), ring),
-            SampleFormat::U8 => Self::build_stream::<u8, _>(&device, &config.config(), ring),
-            SampleFormat::U16 => Self::build_stream::<u16, _>(&device, &config.config(), ring),
-            SampleFormat::U32 => Self::build_stream::<u32, _>(&device, &config.config(), ring),
-            SampleFormat::U64 => Self::build_stream::<u64, _>(&device, &config.config(), ring),
-            SampleFormat::F32 => Self::build_stream::<f32, _>(&device, &config.config(), ring),
-            SampleFormat::F64 => Self::build_stream::<f64, _>(&device, &config.config(), ring),
+            SampleFormat::I8 => Self::build_stream::<i8, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I16 => Self::build_stream::<i16, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I24 => Self::build_stream::<I24, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I32 => Self::build_stream::<i32, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I64 => Self::build_stream::<i64, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U8 => Self::build_stream::<u8, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U16 => Self::build_stream::<u16, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U32 => Self::build_stream::<u32, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U64 => Self::build_stream::<u64, _, E1>(&device, &config.config(), ring),
+            SampleFormat::F32 => Self::build_stream::<f32, _, E1>(&device, &config.config(), ring),
+            SampleFormat::F64 => Self::build_stream::<f64, _, E1>(&device, &config.config(), ring),
             format => fail!(AnyError(format!("unknown format: {format}").into())),
         }?;
 
@@ -550,11 +564,11 @@ impl Player {
         })
     }
 
-    fn build_stream<T: SizedSample + FromSample<f32>, E: Source>(
+    fn build_stream<T: SizedSample + FromSample<f32>, E0: Source, E1: Source>(
         device: &Device,
         config: &StreamConfig,
         ring: Arc<RingBuffer<[f32; 2]>>,
-    ) -> Result<ThreadBound<Stream>, E> {
+    ) -> Result<ThreadBound<Stream>, E0> {
         debug!("build output audio stream");
         let channels = config.channels;
 
@@ -573,8 +587,7 @@ impl Player {
             Instance::SAMPLE_RATE,
             sample_rate,
             Instance::RESAMPLE_QUALITY,
-        )
-        .into_error()?;
+        )?;
 
         let mut cursor = 0;
 
@@ -619,7 +632,7 @@ impl Player {
 
                         resampler.input().extend(samples);
 
-                        match resampler.resample() {
+                        match resampler.resample::<E1>() {
                             Result::Ok(()) => cursor = 0,
                             Result::Err(error) => error!("{error}"),
                         }
@@ -643,50 +656,6 @@ impl Player {
 
     pub fn stream(&self) -> &Stream {
         &self.stream
-    }
-}
-
-#[derive(Debug)]
-pub struct CloseHandle {
-    flag: RwLock<bool>,
-}
-
-impl CloseHandle {
-    fn new() -> Self {
-        Self {
-            flag: RwLock::new(false),
-        }
-    }
-
-    pub async fn closed(&self) -> bool {
-        *self.flag.read().await
-    }
-
-    pub async fn close(&self) {
-        *self.flag.write().await = true;
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Debug)]
-struct ThreadBound<T> {
-    value: T,
-    _phantom: PhantomData<*const ()>,
-}
-
-impl<T> ThreadBound<T> {
-    fn new(value: T) -> Self {
-        Self {
-            value,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<T> Deref for ThreadBound<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.value
     }
 }
 
@@ -717,7 +686,7 @@ impl<T> RingBuffer<T> {
             self.queue.force_push(value);
         }
 
-        self.notify.notify_one();
+        self.notify.notify_waiters();
     }
 
     fn drain(&self) -> impl Iterator<Item = T> {
@@ -730,6 +699,50 @@ impl<T> RingBuffer<T> {
 }
 
 #[derive(Debug)]
+pub struct CloseHandle {
+    notify: Notify,
+}
+
+impl CloseHandle {
+    fn new() -> Self {
+        Self {
+            notify: Notify::new(),
+        }
+    }
+
+    pub fn close(&self) {
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        self.notify.notified().await;
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Debug)]
+struct ThreadBound<T> {
+    value: T,
+    _phantom: PhantomData<*const ()>,
+}
+
+impl<T> ThreadBound<T> {
+    fn new(value: T) -> Self {
+        Self {
+            value,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T> Deref for ThreadBound<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+#[derive(Debug)]
 struct Encoder {
     raw: *mut OpusEncoder,
     channels: u32,
@@ -738,7 +751,7 @@ struct Encoder {
 }
 
 impl Encoder {
-    fn new(sample_rate: u32, channels: u32) -> Result<Self, OpusError> {
+    fn new<E: Source>(sample_rate: u32, channels: u32) -> Result<Self, E> {
         let mut error = 0;
 
         let raw = unsafe {
@@ -750,7 +763,7 @@ impl Encoder {
             )
         };
 
-        OpusError::new(error)?;
+        OpusError::new(error).into_error()?;
 
         Result::Ok(Self {
             raw,
@@ -772,7 +785,7 @@ impl Encoder {
         self.input.len() >= self.channels as usize * frame_size
     }
 
-    fn encode(&mut self, frame_size: usize, max_packet_size: usize) -> Result<(), OpusError> {
+    fn encode<E: Source>(&mut self, frame_size: usize, max_packet_size: usize) -> Result<(), E> {
         self.output.resize(max_packet_size, 0);
 
         let size = unsafe {
@@ -785,7 +798,7 @@ impl Encoder {
             )
         };
 
-        OpusError::new(size)?;
+        OpusError::new(size).into_error()?;
         self.input.drain(0..self.channels as usize * frame_size);
         self.output.truncate(size as _);
         Result::Ok(())
@@ -809,10 +822,10 @@ struct Decoder {
 }
 
 impl Decoder {
-    fn new(sample_rate: u32, channels: u32) -> Result<Self, OpusError> {
+    fn new<E: Source>(sample_rate: u32, channels: u32) -> Result<Self, E> {
         let mut error = 0;
         let raw = unsafe { opus_decoder_create(sample_rate as _, channels as _, &mut error) };
-        OpusError::new(error)?;
+        OpusError::new(error).into_error()?;
 
         Result::Ok(Self {
             raw,
@@ -830,7 +843,7 @@ impl Decoder {
         &self.output
     }
 
-    fn decode(&mut self, max_frame_size: usize) -> Result<(), OpusError> {
+    fn decode<E: Source>(&mut self, max_frame_size: usize) -> Result<(), E> {
         self.output.resize(max_frame_size, 0.0);
 
         let frames = unsafe {
@@ -844,7 +857,7 @@ impl Decoder {
             )
         };
 
-        OpusError::new(frames)?;
+        OpusError::new(frames).into_error()?;
 
         self.output
             .truncate(self.channels as usize * frames as usize);
@@ -895,13 +908,13 @@ struct Resampler {
 }
 
 impl Resampler {
-    fn new(channels: u32, in_rate: u32, out_rate: u32, quality: u32) -> Result<Self, SpeexError> {
+    fn new<E: Source>(channels: u32, in_rate: u32, out_rate: u32, quality: u32) -> Result<Self, E> {
         let mut error = 0;
 
         let raw =
             unsafe { speex_resampler_init(channels, in_rate, out_rate, quality as _, &mut error) };
 
-        SpeexError::new(error)?;
+        SpeexError::new(error).into_error()?;
 
         Result::Ok(Self {
             raw,
@@ -921,7 +934,7 @@ impl Resampler {
         &self.output
     }
 
-    fn resample(&mut self) -> Result<(), SpeexError> {
+    fn resample<E: Source>(&mut self) -> Result<(), E> {
         self.output.resize(
             self.input.len() * self.out_rate as usize / self.in_rate as usize + 1,
             0.0,
@@ -940,7 +953,7 @@ impl Resampler {
             )
         };
 
-        SpeexError::new(error)?;
+        SpeexError::new(error).into_error()?;
         self.input.drain(..(self.channels * in_len) as usize);
         self.output.truncate((self.channels * out_len) as _);
         Result::Ok(())

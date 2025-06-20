@@ -139,7 +139,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
         },
     };
 
-    let _recorder = match connection.record::<BoxedError>() {
+    let _recorder = match connection.record::<BoxedError, BoxedError>() {
         Result::Ok(recorder) => Option::Some(recorder),
         Result::Err(error) => {
             info!(error = &error as &dyn Error);
@@ -147,7 +147,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
         },
     };
 
-    let _player = match connection.play::<BoxedError>() {
+    let _player = match connection.play::<BoxedError, BoxedError>() {
         Result::Ok(player) => Option::Some(player),
         Result::Err(error) => {
             info!(error = &error as &dyn Error);
@@ -163,7 +163,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
         }
 
         debug!("close stream");
-        close_handle.close().await;
+        close_handle.close();
     });
 
     println!("Let's talk!");
