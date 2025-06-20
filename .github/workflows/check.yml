@@ -1,0 +1,56 @@
+on: pull_request
+jobs:
+  vcpkg:
+    steps:
+      - uses: actions/checkout@v4
+      - run: pacman -S vcpkg
+      - run: vcpkg install
+      - uses: actions/cache@v4
+        with:
+          path: vcpkg_installed
+          key: vcpkg
+    container:
+      image: archlinux:latest
+  clippy:
+    needs: vcpkg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+      - run: cargo clippy
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: rust
+  rustfmt:
+    needs: vcpkg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rustfmt
+      - run: cargo +nightly fmt --check
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: rust
+  ruff-lint:
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+      - run: ruff check
+      - uses: actions/cache@v4
+        with:
+          path: .ruff_cache
+          key: ruff
+  ruff-format:
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+      - run: ruff format --diff
+      - uses: actions/cache@v4
+        with:
+          path: .ruff_cache
+          key: ruff
