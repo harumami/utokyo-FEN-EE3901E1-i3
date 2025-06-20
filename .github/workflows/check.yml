@@ -14,10 +14,10 @@ jobs:
       - run: cargo clippy
       - uses: actions/cache@v4
         with:
-          path:
-            - vcpkg
-            - vcpkg_installed
-            - target
+          path: |
+            vcpkg
+            vcpkg_installed
+            target
           key: clippy-${{ hashFiles(vcpkg.json, Cargo.lock) }}
   rustfmt:
     runs-on: ubuntu-latest
