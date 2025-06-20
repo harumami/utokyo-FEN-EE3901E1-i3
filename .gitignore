@@ -1,5 +1,4 @@
 target
 vcpkg_installed
-Cargo.lock
 uv.lock
 **/__pycache__
