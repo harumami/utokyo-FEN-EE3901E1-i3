@@ -1,40 +1,21 @@
 on: [pull_request, workflow_dispatch]
 jobs:
-  vcpkg:
+  clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: git clone https://github.com/microsoft/vcpkg
       - run: vcpkg/bootstrap-vcpkg.sh --disableMetrics
       - run: vcpkg/vcpkg install --vcpkg-root=vcpkg
-      - uses: actions/cache@v4
-        with:
-          path: vcpkg_installed
-          key: vcpkg-${{ hashFiles('vcpkg.json') }}
-  clippy:
-    needs: vcpkg
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache/restore@v4
-        with:
-          path: vcpkg_installed
-          key: vcpkg-${{ hashFiles('vcpkg.json') }}
-          fail-on-cache-miss: true
+      - run: apt install libasound2-dev
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy
       - run: cargo clippy
   rustfmt:
-    needs: vcpkg
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache/restore@v4
-        with:
-          path: vcpkg_installed
-          key: vcpkg-${{ hashFiles('vcpkg.json') }}
-          fail-on-cache-miss: true
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: nightly
