@@ -150,7 +150,9 @@ fn run(command: Command) -> Result<(), BoxedError> {
         close_handle.close().await;
     });
 
+    println!("Let's talk!");
     runtime.block_on(connection.join())?;
+    println!("Bye.");
 
     if let Result::Err(error) = recorder {
         info!(error = &error as &dyn Error);
