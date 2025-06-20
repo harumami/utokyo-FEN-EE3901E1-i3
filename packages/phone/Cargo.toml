@@ -1,0 +1,16 @@
+[package]
+name = "phone"
+version = "0.0.0"
+edition.workspace = true
+
+[dependencies]
+cpal.workspace = true
+crossbeam.workspace = true
+dasp = { workspace = true, features = ["signal"] }
+iroh.workspace = true
+log.workspace = true
+rancor.workspace = true
+rand.workspace = true
+tokio.workspace = true
+opus-sys = { workspace = true }
+speex-sys = { workspace = true }

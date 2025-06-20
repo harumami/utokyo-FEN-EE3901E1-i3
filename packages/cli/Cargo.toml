@@ -5,16 +5,10 @@ edition.workspace = true
 
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
-cpal.workspace = true
-crossbeam.workspace = true
-dasp = { workspace = true, features = ["signal"] }
 iroh.workspace = true
 rancor.workspace = true
-rand.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
-tracing-error.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-opus-sys = { workspace = true }
-speex-sys = { workspace = true }
+phone = { workspace = true }
