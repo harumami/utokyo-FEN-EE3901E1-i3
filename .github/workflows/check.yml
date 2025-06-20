@@ -1,6 +1,7 @@
 on: [pull_request, workflow_dispatch]
 jobs:
   vcpkg:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: pacman -S vcpkg
@@ -13,6 +14,7 @@ jobs:
       image: archlinux:latest
   clippy:
     needs: vcpkg
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -25,6 +27,7 @@ jobs:
           key: rust
   rustfmt:
     needs: vcpkg
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -37,6 +40,7 @@ jobs:
           path: target
           key: rust
   ruff-lint:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/ruff-action@v3
@@ -46,6 +50,7 @@ jobs:
           path: .ruff_cache
           key: ruff
   ruff-format:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/ruff-action@v3
