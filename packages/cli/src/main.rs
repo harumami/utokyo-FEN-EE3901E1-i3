@@ -42,7 +42,6 @@ use {
         registry::Registry,
         util::SubscriberInitExt as _,
     },
-    tracing::debug,
 };
 
 fn main() -> ExitCode {
