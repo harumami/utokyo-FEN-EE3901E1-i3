@@ -5,6 +5,7 @@ use {
         StreamConfig,
         platform::{
             Device,
+            Host,
             Stream,
             default_host,
         },
@@ -373,6 +374,8 @@ impl<E0: Source> Connection<E0> {
 }
 
 pub struct Recorder {
+    host: Host,
+    device: Device,
     stream: ThreadBound<Stream>,
 }
 
@@ -422,6 +425,8 @@ impl Recorder {
         stream.play().into_error()?;
 
         Result::Ok(Self {
+            host,
+            device,
             stream,
         })
     }
@@ -487,12 +492,22 @@ impl Recorder {
         Result::Ok(ThreadBound::new(stream))
     }
 
+    pub fn host(&self) -> &Host {
+        &self.host
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
     pub fn stream(&self) -> &Stream {
         &self.stream
     }
 }
 
 pub struct Player {
+    host: Host,
+    device: Device,
     stream: ThreadBound<Stream>,
 }
 
@@ -542,6 +557,8 @@ impl Player {
         stream.play().into_error()?;
 
         Result::Ok(Self {
+            host,
+            device,
             stream,
         })
     }
@@ -620,6 +637,14 @@ impl Player {
             .into_error()?;
 
         Result::Ok(ThreadBound::new(stream))
+    }
+
+    pub fn host(&self) -> &Host {
+        &self.host
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     pub fn stream(&self) -> &Stream {
