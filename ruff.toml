@@ -3,5 +3,6 @@ docstring-code-format = true
 skip-magic-trailing-comma = true
 
 [lint]
-ignore = ["D"]
+ignore = ["COM812", "D"]
 select = ["ALL"]
+isort.split-on-trailing-comma = false
