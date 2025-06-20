@@ -8,14 +8,14 @@ import queue
 process = None
 output_queue = queue.Queue()
 
+
 def join():
     global process
     node_id = id_entry.get()
     if node_id and not process:
-        process = subprocess.Popen(
-            ["target/debug/cli", "join", node_id]
-        )
+        process = subprocess.Popen(["target/debug/cli", "join", node_id])
         status_label.config(text=f"connecting to Node {node_id}")
+
 
 def host():
     """「Host」ボタンの処理。コマンド実行を別スレッドで開始する"""
@@ -28,6 +28,7 @@ def host():
         # 実行中はボタンを無効化する
         host_button.config(state="disabled")
         join_button.config(state="disabled")
+
 
 def run_host_command():
     """バックグラウンドスレッドでホストコマンドを実行し、出力をキューに入れる"""
@@ -60,6 +61,7 @@ def run_host_command():
         # 処理完了後にキューに目印を入れる
         output_queue.put(None)
 
+
 def check_queue():
     """キューを定期的にチェックしてGUIを更新する"""
     try:
@@ -86,6 +88,7 @@ def check_queue():
         # 100ミリ秒後に再度この関数を実行する
         root.after(100, check_queue)
 
+
 def stop():
     """「Stop」ボタンの処理"""
     global process
@@ -97,6 +100,7 @@ def stop():
     # ボタンを再度有効化する
     host_button.config(state="normal")
     join_button.config(state="normal")
+
 
 # --- ウィンドウの作成 ---
 root = tk.Tk()

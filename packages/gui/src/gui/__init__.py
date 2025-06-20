@@ -1,4 +1,5 @@
-from . import main as _ # noqa: F401
+from . import main as _  # noqa: F401
 
-def main():
+
+def main() -> None:
     pass

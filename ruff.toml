@@ -1,0 +1,7 @@
+[format]
+docstring-code-format = true
+skip-magic-trailing-comma = true
+
+[lint]
+ignore = ["D"]
+select = ["ALL"]
