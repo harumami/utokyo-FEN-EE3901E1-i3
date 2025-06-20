@@ -18,7 +18,7 @@ jobs:
             vcpkg
             vcpkg_installed
             target
-          key: clippy-${{ hashFiles(vcpkg.json, Cargo.lock) }}
+          key: clippy-${{ hashFiles('vcpkg.json', 'Cargo.lock') }}
   rustfmt:
     runs-on: ubuntu-latest
     steps:
