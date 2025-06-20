@@ -6,11 +6,11 @@ jobs:
       - uses: actions/checkout@v4
       - run: pacman -Syu --noconfirm 
       - run: pacman -S vcpkg --noconfirm
-      - run: mkdir -p ~/.local/share/vcpkg/.vcpkg-root
+      - run: mkdir .vcpkg-root
       - run: vcpkg install
         env:
           VCPKG_DISABLE_METRICS: 1
-          VCPKG_ROOT: ~/.local/share/vcpkg
+          VCPKG_ROOT: .
       - uses: actions/cache@v4
         with:
           path: vcpkg_installed
