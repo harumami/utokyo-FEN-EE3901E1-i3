@@ -7,6 +7,7 @@ jobs:
       - run: pacman -Syu --noconfirm 
       - run: pacman -S vcpkg --noconfirm
       - run: source /etc/profile.d/vcpkg.sh
+      - run: echo $VCPKG_ROOT
       - run: vcpkg install
       - uses: actions/cache@v4
         with:
