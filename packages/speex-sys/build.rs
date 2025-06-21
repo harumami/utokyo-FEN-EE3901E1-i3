@@ -2,12 +2,15 @@
 use ::bindgen::CargoCallbacks;
 use {
     ::bindgen::builder,
-    ::cmake::build,
+    ::cmake::Config,
     ::std::env::var,
 };
 
 fn main() {
-    let dist = build(".");
+    let dist = Config::new(".")
+        .define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreadedDLL")
+        .build();
+
     let mut header = dist.clone();
     header.extend(["include", "speex", "speex_resampler.h"]);
     let header = header.into_os_string().into_string().unwrap();

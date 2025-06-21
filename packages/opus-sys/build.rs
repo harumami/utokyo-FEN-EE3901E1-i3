@@ -2,12 +2,12 @@
 use ::bindgen::CargoCallbacks;
 use {
     ::bindgen::builder,
-    ::cmake::build,
+    ::cmake::Config,
     ::std::env::var,
 };
 
 fn main() {
-    let dist = build(".");
+    let dist = Config::new(".").profile("Release").build();
     let mut header = dist.clone();
     header.extend(["include", "opus", "opus.h"]);
     let header = header.into_os_string().into_string().unwrap();

@@ -11,9 +11,9 @@ FetchContent_Populate(
   GIT_TAG SpeexDSP-1.2.1
 )
 
-option(USE_SSE      "Use SSE"                     OFF)
-option(USE_NEON     "Use NEON"                    OFF)
-option(FIXED_POINT  "Use Fixed Point Arithmetic"  OFF)
+set(USE_SSE OFF)
+set(USE_NEON OFF)
+set(FIXED_POINT OFF)
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i686|x86")
     set(USE_SSE ON)
