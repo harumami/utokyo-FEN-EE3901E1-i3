@@ -1,5 +1,5 @@
 [workspace]
-members = ["packages/cli", "packages/opus-sys", "packages/phone", "packages/phone-py", "packages/speex-sys"]
+members = ["cli", "opus-sys", "phone", "phone-py", "speex-sys"]
 resolver = "3"
 
 [workspace.package]
