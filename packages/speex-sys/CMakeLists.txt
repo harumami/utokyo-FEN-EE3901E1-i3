@@ -1,7 +1,7 @@
 # This CMake script fetches and builds the SpeexDSP source code.
 # It is based on the vcpkg port: https://github.com/microsoft/vcpkg/blob/master/ports/speexdsp/CMakeLists.txt
 
-cmake_minimum_required(VERSION 4.0)
+cmake_minimum_required(VERSION 3.20)
 project(NONE)
 include(FetchContent)
 
