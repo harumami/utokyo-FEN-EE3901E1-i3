@@ -1,5 +1,5 @@
 [project]
-name = "phone-py"
+name = "hypha-py"
 dynamic = ["version"]
 
 [build-system]

@@ -1,10 +1,10 @@
 [package]
-name = "phone-py"
+name = "hypha-py"
 version = "0.0.0"
 edition.workspace = true
 
 [lib]
-name = "phone_py"
+name = "hypha_py"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
@@ -14,8 +14,8 @@ pyo3-async-runtimes = { workspace = true, features = ["tokio-runtime"] }
 pyo3-stub-gen.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-phone.workspace = true
 rancor.workspace = true
+hypha-core.workspace = true
 
 [[bin]]
 name = "stub_gen"

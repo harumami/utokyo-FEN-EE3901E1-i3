@@ -14,7 +14,7 @@ def main():
         global process
         node_id = id_entry.get()
         if node_id and not process:
-            process = subprocess.Popen(["target/debug/cli", "join", node_id])
+            process = subprocess.Popen(["target/debug/hypha-cli", "join", node_id])
             status_label.config(text=f"connecting to Node {node_id}")
 
     def host():
@@ -32,7 +32,7 @@ def main():
     def run_host_command():
         """バックグラウンドスレッドでホストコマンドを実行し、出力をキューに入れる"""
         global process
-        host_command = ["target/debug/cli", "host"]
+        host_command = ["target/debug/hypha-cli", "host"]
 
         try:
             process = subprocess.Popen(

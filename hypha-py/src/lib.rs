@@ -1,11 +1,11 @@
 use {
-    ::iroh::NodeId as RsNodeId,
-    ::phone::{
+    ::hypha_core::{
         CloseHandle as RsCloseHandle,
         Connection as RsConnection,
         Instance as RsInstance,
         Secret as RsSecret,
     },
+    ::iroh::NodeId as RsNodeId,
     ::pyo3::{
         Bound,
         PyErr,

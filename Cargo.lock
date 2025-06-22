@@ -473,20 +473,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
 
 [[package]]
-name = "cli"
-version = "0.3.0"
-dependencies = [
- "clap",
- "iroh",
- "phone",
- "rancor",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "cmake"
 version = "0.1.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1559,6 +1545,50 @@ dependencies = [
  "socket2",
  "tokio",
  "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "hypha-cli"
+version = "0.3.0"
+dependencies = [
+ "clap",
+ "hypha-core",
+ "iroh",
+ "rancor",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "hypha-core"
+version = "0.0.0"
+dependencies = [
+ "cpal",
+ "crossbeam",
+ "dasp",
+ "iroh",
+ "opus-sys",
+ "rancor",
+ "rand 0.8.5",
+ "speex-sys",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "hypha-py"
+version = "0.0.0"
+dependencies = [
+ "hypha-core",
+ "iroh",
+ "pyo3",
+ "pyo3-async-runtimes",
+ "pyo3-stub-gen",
+ "rancor",
+ "tokio",
  "tracing",
 ]
 
@@ -2805,36 +2835,6 @@ checksum = "e9567389417feee6ce15dd6527a8a1ecac205ef62c2932bcf3d9f6fc5b78b414"
 dependencies = [
  "futures",
  "rustc_version",
-]
-
-[[package]]
-name = "phone"
-version = "0.0.0"
-dependencies = [
- "cpal",
- "crossbeam",
- "dasp",
- "iroh",
- "opus-sys",
- "rancor",
- "rand 0.8.5",
- "speex-sys",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "phone-py"
-version = "0.0.0"
-dependencies = [
- "iroh",
- "phone",
- "pyo3",
- "pyo3-async-runtimes",
- "pyo3-stub-gen",
- "rancor",
- "tokio",
- "tracing",
 ]
 
 [[package]]

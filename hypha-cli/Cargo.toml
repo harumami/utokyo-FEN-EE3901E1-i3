@@ -1,5 +1,5 @@
 [package]
-name = "cli"
+name = "hypha-cli"
 version = "0.3.0"
 edition.workspace = true
 
@@ -11,4 +11,4 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-phone = { workspace = true }
+hypha-core = { workspace = true }

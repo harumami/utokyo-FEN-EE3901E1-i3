@@ -1,11 +1,11 @@
 [project]
-name = "eeic-i3"
+name = "hypha"
 version = "0.0.0"
 requires-python = ">=3.13"
 
 [tool.uv.workspace]
-members = ["gui", "maturin-with-stub", "phone-py"]
+members = ["hypha-gui", "hypha-py", "maturin-with-stub"]
 
 [tool.uv.sources]
 maturin-with-stub.workspace = true
-phone-py.workspace = true
+hypha-py.workspace = true

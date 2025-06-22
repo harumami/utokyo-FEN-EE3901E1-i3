@@ -3,11 +3,11 @@ use {
         Parser,
         Subcommand,
     },
-    ::iroh::NodeId,
-    ::phone::{
+    ::hypha_core::{
         Instance,
         Secret,
     },
+    ::iroh::NodeId,
     ::rancor::{
         BoxedError,
         ResultExt as _,
