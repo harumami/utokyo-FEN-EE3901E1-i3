@@ -4,7 +4,7 @@ version = "0.0.0"
 dependencies = ["hypha-py"]
 
 [project.scripts]
-gui = "gui:main"
+hypha-gui = "hypha_gui:main"
 
 [build-system]
 requires = ["uv_build==0.7.13"]
