@@ -8,6 +8,14 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: rust-clippy-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo clippy
   rustfmt:
     runs-on: ubuntu-latest
