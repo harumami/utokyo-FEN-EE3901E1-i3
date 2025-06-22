@@ -1,12 +1,9 @@
 on: [pull_request, workflow_dispatch]
 jobs:
-  clippy:
+  rust-clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: git clone https://github.com/microsoft/vcpkg
-      - run: vcpkg/bootstrap-vcpkg.sh --disableMetrics
-      - run: vcpkg/vcpkg install --vcpkg-root=vcpkg
       - run: sudo apt install libasound2-dev
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
