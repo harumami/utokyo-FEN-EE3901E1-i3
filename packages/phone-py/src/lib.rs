@@ -1,7 +1,6 @@
 use {
     ::iroh::NodeId as RsNodeId,
     ::phone::{
-        AudioStream as RsAudioStream,
         CloseHandle as RsCloseHandle,
         Connection as RsConnection,
         Instance as RsInstance,
@@ -23,12 +22,9 @@ use {
         },
     },
     ::pyo3_async_runtimes::tokio::future_into_py,
-    ::pyo3_stub_gen::{
-        define_stub_info_gatherer,
-        derive::{
-            gen_stub_pyclass,
-            gen_stub_pymethods,
-        },
+    ::pyo3_stub_gen::derive::{
+        gen_stub_pyclass,
+        gen_stub_pymethods,
     },
     ::rancor::{
         BoxedError,
@@ -45,17 +41,15 @@ use {
             Result as FmtResult,
         },
         str::FromStr as _,
-    },
-    std::{
         sync::Arc,
         thread::sleep,
         time::Duration,
     },
-    tokio::task::{
+    ::tokio::task::{
         JoinHandle,
         spawn_blocking,
     },
-    tracing::trace,
+    ::tracing::error,
 };
 
 #[pymodule]
@@ -64,6 +58,8 @@ fn phone_py(module: &Bound<PyModule>) -> PyResult<()> {
     module.add_class::<NodeId>()?;
     module.add_class::<Instance>()?;
     module.add_class::<Connection>()?;
+    module.add_class::<AudioStream>()?;
+    module.add_class::<CloseHandle>()?;
     Result::Ok(())
 }
 
@@ -172,7 +168,13 @@ impl Connection {
         let this = this.unbind();
 
         AudioStream(spawn_blocking(move || {
-            let _stream = this.get().0.record::<RuntimeError, RuntimeError>();
+            let _stream = match this.get().0.record::<RuntimeError, RuntimeError>() {
+                Result::Ok(stream) => Option::Some(stream),
+                Result::Err(error) => {
+                    error!(error = &error as &dyn Error);
+                    Option::None
+                },
+            };
 
             loop {
                 sleep(Duration::from_secs(1024));
@@ -187,7 +189,7 @@ impl Connection {
             let _stream = match this.get().0.play::<RuntimeError, RuntimeError>() {
                 Result::Ok(stream) => Option::Some(stream),
                 Result::Err(error) => {
-                    trace!(error = &error as &dyn Error);
+                    error!(error = &error as &dyn Error);
                     Option::None
                 },
             };
@@ -252,5 +254,3 @@ impl From<RuntimeError> for PyErr {
         PyRuntimeError::new_err(format!("{value}"))
     }
 }
-
-define_stub_info_gatherer!(stub_info);

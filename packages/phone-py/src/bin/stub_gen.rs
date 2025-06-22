@@ -1,5 +1,12 @@
-use ::phone_py::stub_info;
+use {
+    ::phone_py as _,
+    ::pyo3_stub_gen::generate::StubInfo,
+    ::std::env::current_dir,
+};
 
 fn main() {
-    stub_info().unwrap().generate().unwrap();
+    StubInfo::from_project_root("phone_py".to_owned(), current_dir().unwrap())
+        .unwrap()
+        .generate()
+        .unwrap();
 }

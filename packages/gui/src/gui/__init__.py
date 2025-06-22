@@ -1,5 +1,3 @@
-from . import main as _  # noqa: F401
+from .main import main
 
-
-def main() -> None:
-    pass
+__all__ = ["main"]

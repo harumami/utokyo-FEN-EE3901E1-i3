@@ -1,10 +1,10 @@
 [project]
 name = "phone-py"
-version = "0.0.0"
+dynamic = ["version"]
 
 [build-system]
-requires = ["maturin==1.8.7"]
-build-backend = "maturin"
+requires = ["maturin-with-stub"]
+build-backend = "maturin_with_stub"
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "src/*.rs" }]

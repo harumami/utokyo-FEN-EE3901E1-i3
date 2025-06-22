@@ -4,7 +4,8 @@ version = "0.0.0"
 requires-python = ">=3.13"
 
 [tool.uv.workspace]
-members = ["packages/gui", "packages/phone-py"]
+members = ["packages/gui", "packages/maturin-with-stub", "packages/phone-py"]
 
 [tool.uv.sources]
-phone-py = { workspace = true }
+maturin-with-stub.workspace = true
+phone-py.workspace = true
