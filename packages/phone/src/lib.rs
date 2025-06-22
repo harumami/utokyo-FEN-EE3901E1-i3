@@ -1,8 +1,10 @@
 use {
     ::cpal::{
         SampleFormat,
+        SampleRate,
         SizedSample,
         StreamConfig,
+        SupportedStreamConfigRange,
         platform::{
             Device,
             Host,
@@ -30,12 +32,6 @@ use {
             RecvStream,
             SendStream,
         },
-    },
-    ::log::{
-        debug,
-        error,
-        trace,
-        warn,
     },
     ::opus_sys::{
         OPUS_APPLICATION_VOIP,
@@ -83,13 +79,19 @@ use {
         sync::Arc,
     },
     ::tokio::{
+        select,
         sync::Notify,
         task::{
             JoinHandle,
             spawn,
         },
     },
-    tokio::select,
+    ::tracing::{
+        debug,
+        error,
+        trace,
+        warn,
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -98,10 +100,14 @@ pub struct Secret {
 }
 
 impl Secret {
-    pub fn generate() -> Self {
+    pub fn new(key: SecretKey) -> Self {
         Self {
-            key: SecretKey::generate(OsRng),
+            key,
         }
+    }
+
+    pub fn generate() -> Self {
+        Self::new(SecretKey::generate(OsRng))
     }
 
     pub fn node_id(&self) -> NodeId {
@@ -234,12 +240,12 @@ pub struct Connection<E> {
 }
 
 impl<E0> Connection<E0> {
-    pub fn record<E1: Source, E2: Source>(&self) -> Result<Recorder, E1> {
-        Recorder::new::<_, E2>(self.rec_ring.clone())
+    pub fn record<E1: Source, E2: Source>(&self) -> Result<AudioStream, E1> {
+        AudioStream::record::<_, E2>(self.rec_ring.clone())
     }
 
-    pub fn play<E1: Source, E2: Source>(&self) -> Result<Player, E1> {
-        Player::new::<_, E2>(self.play_ring.clone())
+    pub fn play<E1: Source, E2: Source>(&self) -> Result<AudioStream, E1> {
+        AudioStream::play::<_, E2>(self.play_ring.clone())
     }
 
     pub fn close_handle(&self) -> &Arc<CloseHandle> {
@@ -311,7 +317,6 @@ impl<E0: Source> Connection<E0> {
 
             spawn(async move {
                 let mut decoder = Decoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS)?;
-
                 debug!("start play loop");
 
                 let play_loop = async {
@@ -374,14 +379,14 @@ impl<E0: Source> Connection<E0> {
     }
 }
 
-pub struct Recorder {
+pub struct AudioStream {
     host: Host,
     device: Device,
     stream: ThreadBound<Stream>,
 }
 
-impl Recorder {
-    fn new<E0: Source, E1: Source>(ring: Arc<RingBuffer<[f32; 2]>>) -> Result<Self, E0> {
+impl AudioStream {
+    fn record<E0: Source, E1: Source>(ring: Arc<RingBuffer<[f32; 2]>>) -> Result<Self, E0> {
         let host = default_host();
         debug!("audio host: {:?}", host.id());
         let device = host.default_input_device().into_error()?;
@@ -392,34 +397,22 @@ impl Recorder {
             .into_error()?
             .collect::<Vec<_>>();
 
-        configs.sort_by_key(|config| {
-            Reverse((
-                match config.channels() {
-                    1 => 1,
-                    2 => 2,
-                    _ => 0,
-                },
-                config.max_sample_rate(),
-                config.sample_format().sample_size(),
-                config.sample_format().is_float(),
-            ))
-        });
-
+        configs.sort_by_key(Self::config_sort_key);
         let config = configs.first().into_error()?.with_max_sample_rate();
         debug!("input audio config: {config:?}");
 
         let stream = match config.sample_format() {
-            SampleFormat::I8 => Self::build_stream::<i8, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I16 => Self::build_stream::<i16, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I24 => Self::build_stream::<I24, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I32 => Self::build_stream::<i32, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I64 => Self::build_stream::<i64, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U8 => Self::build_stream::<u8, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U16 => Self::build_stream::<u16, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U32 => Self::build_stream::<u32, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U64 => Self::build_stream::<u64, _, E1>(&device, &config.config(), ring),
-            SampleFormat::F32 => Self::build_stream::<f32, _, E1>(&device, &config.config(), ring),
-            SampleFormat::F64 => Self::build_stream::<f64, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I8 => Self::build_input::<i8, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I16 => Self::build_input::<i16, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I24 => Self::build_input::<I24, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I32 => Self::build_input::<i32, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I64 => Self::build_input::<i64, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U8 => Self::build_input::<u8, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U16 => Self::build_input::<u16, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U32 => Self::build_input::<u32, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U64 => Self::build_input::<u64, _, E1>(&device, &config.config(), ring),
+            SampleFormat::F32 => Self::build_input::<f32, _, E1>(&device, &config.config(), ring),
+            SampleFormat::F64 => Self::build_input::<f64, _, E1>(&device, &config.config(), ring),
             format => fail!(AnyError(format!("unknown format: {format}").into())),
         }?;
 
@@ -432,7 +425,7 @@ impl Recorder {
         })
     }
 
-    fn build_stream<T: SizedSample + ToSample<f32>, E0: Source, E1: Source>(
+    fn build_input<T: SizedSample + ToSample<f32>, E0: Source, E1: Source>(
         device: &Device,
         config: &StreamConfig,
         ring: Arc<RingBuffer<[f32; 2]>>,
@@ -493,27 +486,7 @@ impl Recorder {
         Result::Ok(ThreadBound::new(stream))
     }
 
-    pub fn host(&self) -> &Host {
-        &self.host
-    }
-
-    pub fn device(&self) -> &Device {
-        &self.device
-    }
-
-    pub fn stream(&self) -> &Stream {
-        &self.stream
-    }
-}
-
-pub struct Player {
-    host: Host,
-    device: Device,
-    stream: ThreadBound<Stream>,
-}
-
-impl Player {
-    fn new<E0: Source, E1: Source>(ring: Arc<RingBuffer<[f32; 2]>>) -> Result<Self, E0> {
+    fn play<E0: Source, E1: Source>(ring: Arc<RingBuffer<[f32; 2]>>) -> Result<Self, E0> {
         let host = default_host();
         debug!("audio host: {:?}", host.id());
         let device = host.default_output_device().into_error()?;
@@ -524,34 +497,22 @@ impl Player {
             .into_error()?
             .collect::<Vec<_>>();
 
-        configs.sort_by_key(|config| {
-            Reverse((
-                match config.channels() {
-                    1 => 1,
-                    2 => 2,
-                    _ => 0,
-                },
-                config.max_sample_rate(),
-                config.sample_format().sample_size(),
-                config.sample_format().is_float(),
-            ))
-        });
-
+        configs.sort_by_key(Self::config_sort_key);
         let config = configs.first().into_error()?.with_max_sample_rate();
         debug!("output audio config: {config:?}");
 
         let stream = match config.sample_format() {
-            SampleFormat::I8 => Self::build_stream::<i8, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I16 => Self::build_stream::<i16, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I24 => Self::build_stream::<I24, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I32 => Self::build_stream::<i32, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I64 => Self::build_stream::<i64, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U8 => Self::build_stream::<u8, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U16 => Self::build_stream::<u16, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U32 => Self::build_stream::<u32, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U64 => Self::build_stream::<u64, _, E1>(&device, &config.config(), ring),
-            SampleFormat::F32 => Self::build_stream::<f32, _, E1>(&device, &config.config(), ring),
-            SampleFormat::F64 => Self::build_stream::<f64, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I8 => Self::build_output::<i8, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I16 => Self::build_output::<i16, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I24 => Self::build_output::<I24, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I32 => Self::build_output::<i32, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I64 => Self::build_output::<i64, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U8 => Self::build_output::<u8, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U16 => Self::build_output::<u16, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U32 => Self::build_output::<u32, _, E1>(&device, &config.config(), ring),
+            SampleFormat::U64 => Self::build_output::<u64, _, E1>(&device, &config.config(), ring),
+            SampleFormat::F32 => Self::build_output::<f32, _, E1>(&device, &config.config(), ring),
+            SampleFormat::F64 => Self::build_output::<f64, _, E1>(&device, &config.config(), ring),
             format => fail!(AnyError(format!("unknown format: {format}").into())),
         }?;
 
@@ -564,7 +525,7 @@ impl Player {
         })
     }
 
-    fn build_stream<T: SizedSample + FromSample<f32>, E0: Source, E1: Source>(
+    fn build_output<T: SizedSample + FromSample<f32>, E0: Source, E1: Source>(
         device: &Device,
         config: &StreamConfig,
         ring: Arc<RingBuffer<[f32; 2]>>,
@@ -646,6 +607,21 @@ impl Player {
         Result::Ok(ThreadBound::new(stream))
     }
 
+    fn config_sort_key(
+        config: &SupportedStreamConfigRange,
+    ) -> Reverse<(i32, SampleRate, usize, bool)> {
+        Reverse((
+            match config.channels() {
+                1 => 1,
+                2 => 2,
+                _ => 0,
+            },
+            config.max_sample_rate(),
+            config.sample_format().sample_size(),
+            config.sample_format().is_float(),
+        ))
+    }
+
     pub fn host(&self) -> &Host {
         &self.host
     }
@@ -719,7 +695,7 @@ impl CloseHandle {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash, Debug)]
 struct ThreadBound<T> {
     value: T,
     _phantom: PhantomData<*const ()>,
@@ -874,7 +850,7 @@ impl Drop for Decoder {
 
 unsafe impl Send for Decoder {}
 
-#[derive(Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct OpusError(c_int);
 
 impl OpusError {
@@ -968,7 +944,7 @@ impl Drop for Resampler {
 
 unsafe impl Send for Resampler {}
 
-#[derive(Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct SpeexError(c_int);
 
 impl SpeexError {

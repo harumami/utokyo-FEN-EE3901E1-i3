@@ -1,2 +1,10 @@
+[project]
+name = "eeic-i3"
+version = "0.0.0"
+requires-python = ">=3.13"
+
 [tool.uv.workspace]
-members = ["packages/gui"]
+members = ["packages/gui", "packages/phone-py"]
+
+[tool.uv.sources]
+phone-py = { workspace = true }

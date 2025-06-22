@@ -1,0 +1,21 @@
+[package]
+name = "phone-py"
+version = "0.0.0"
+edition.workspace = true
+
+[lib]
+name = "phone_py"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+iroh.workspace = true
+pyo3 = { workspace = true, features = ["abi3"] }
+pyo3-async-runtimes = { workspace = true, features = ["tokio-runtime"] }
+pyo3-stub-gen.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+phone.workspace = true
+rancor.workspace = true
+
+[[bin]]
+name = "stub_gen"

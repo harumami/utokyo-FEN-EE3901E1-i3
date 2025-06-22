@@ -8,9 +8,9 @@ cpal.workspace = true
 crossbeam.workspace = true
 dasp = { workspace = true, features = ["signal"] }
 iroh.workspace = true
-log.workspace = true
 rancor.workspace = true
 rand.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 opus-sys = { workspace = true }
 speex-sys = { workspace = true }

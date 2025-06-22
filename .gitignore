@@ -2,3 +2,4 @@ target
 uv.lock
 **/build
 **/__pycache__
+**/*.pyi
