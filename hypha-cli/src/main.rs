@@ -30,6 +30,7 @@ use {
         runtime::Runtime,
         signal::ctrl_c,
         select,
+        sync::watch,
     },
     ::tracing::{
         debug,
@@ -233,4 +234,29 @@ enum Command {
     Join {
         node_id: NodeId,
     },
+}
+
+pub struct CloseHandle {
+    tx: watch::Sender<bool>,
+    rx: watch::Receiver<bool>,
+}
+
+impl CloseHandle {
+    pub fn new() -> Self {
+        let (tx, rx) = watch::channel(false);
+        Self { tx, rx }
+    }
+
+    pub fn close(&self) {
+        let _ = self.tx.send(true);
+    }
+
+    pub async fn wait(&self) {
+        let mut rx = self.rx.clone();
+        while !*rx.borrow() {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+    }
 }

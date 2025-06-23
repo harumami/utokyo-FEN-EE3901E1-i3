@@ -92,6 +92,7 @@ use {
             JoinHandle,
             spawn,
         },
+        sync::watch,
     },
     ::tracing::{
         debug,
@@ -713,22 +714,27 @@ impl<T> RingBuffer<T> {
 
 #[derive(Debug)]
 pub struct CloseHandle {
-    notify: Notify,
+    tx: watch::Sender<bool>,
+    rx: watch::Receiver<bool>,
 }
 
 impl CloseHandle {
     fn new() -> Self {
-        Self {
-            notify: Notify::new(),
-        }
+        let (tx, rx) = watch::channel(false);
+        Self { tx, rx }
     }
 
     pub fn close(&self) {
-        self.notify.notify_waiters();
+        let _ = self.tx.send(true);
     }
 
     pub async fn wait(&self) {
-        self.notify.notified().await;
+        let mut rx = self.rx.clone();
+        while !*rx.borrow() {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
     }
 }
 
