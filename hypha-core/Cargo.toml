@@ -13,4 +13,4 @@ rand.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 opus-rs.workspace = true
-speex-sys = { workspace = true }
+speex-rs = { workspace = true }
