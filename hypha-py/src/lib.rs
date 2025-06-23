@@ -53,7 +53,7 @@ use {
 };
 
 #[pymodule]
-fn phone_py(module: &Bound<PyModule>) -> PyResult<()> {
+fn hypha_py(module: &Bound<PyModule>) -> PyResult<()> {
     module.add_class::<Secret>()?;
     module.add_class::<NodeId>()?;
     module.add_class::<Instance>()?;
