@@ -1,11 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_REQUIRED_LIBRARIES m)
 project(hypha-lpc CXX)
-
-add_library(
-  hypha-lpc
-  src/LPC.cpp
-)
+add_library(hypha-lpc src/LPC.cpp)
 
 target_include_directories(
   hypha-lpc
@@ -34,8 +33,4 @@ FetchContent_Declare(
 )
 
 FetchContent_MakeAvailable(eigen)
-
-target_link_libraries(
-  hypha-lpc
-  Eigen3::Eigen
-)
+target_link_libraries(hypha-lpc Eigen3::Eigen)
