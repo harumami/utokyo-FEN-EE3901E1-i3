@@ -29,6 +29,7 @@ use {
         },
         runtime::Runtime,
         signal::ctrl_c,
+        select,
     },
     ::tracing::{
         debug,
@@ -164,6 +165,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
     };
 
     let close_handle = connection.close_handle().clone();
+    let mute_handle = connection.mute_handle();
 
     runtime.spawn(async move {
         if let Result::Err(error) = ctrl_c().await {
@@ -182,15 +184,15 @@ fn run(command: Command) -> Result<(), BoxedError> {
         let mut line = String::new();
 
         loop {
-            tokio::select! {
+            select! {
                 _ = input_close_handle.wait() => break,
                 result = reader.read_line(&mut line) => match result {
                     Ok(0) => break,
                     Ok(_) => {
                         if line.trim() == "m" {
-                            input_connection.toggle_mute();
+                            mute_handle.toggle();
 
-                            if input_connection.is_muted() {
+                            if mute_handle.is_muted() {
                                 println!("\n[ MUTED ]");
                             } else {
                                 println!("\n[ UNMUTED ]");
