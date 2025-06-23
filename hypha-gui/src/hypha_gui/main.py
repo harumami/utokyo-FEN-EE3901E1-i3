@@ -1,165 +1,155 @@
-import tkinter as tk
-from tkinter import ttk, scrolledtext
-import subprocess
-import threading
-import queue
-import hypha_py
-import typing
+# ruff: noqa: E501
 import asyncio
+import functools
+import tkinter as tk
+import typing
+import threading
+from tkinter import ttk
 
+# hypha_pyのスタブをインポート
+# ruff: noqa: F401
+import hypha_py
 
+# asyncio用のキューを使用
+# GUIスレッドとasyncioスレッド間で安全に通信するために使用
+output_queue: asyncio.Queue[str] = asyncio.Queue()
 
-
-
-output_queue = asyncio.Queue()
-
-hypha_instance: typing .Optional[hypha_py.Instance] = None
-hypha_connection: typing.Optional[hypha_py.Connection] = None
-close_handles: typing.List[hypha_py.CloseHandle] = []
+# --- グローバル変数 ---
+# これらはasyncioスレッドで管理される
+hypha_instance: typing.Optional["hypha_py.Instance"] = None
+hypha_connection: typing.Optional["hypha_py.Connection"] = None
+close_handles: list["hypha_py.CloseHandle"] = []
 running_task: typing.Optional[asyncio.Task] = None
 
-# --- GUIとasyncioを連携させるためのヘルパー ---
-async def run_tk(root: tk.Tk):
-    """TkinterのGUIを更新し続けるための非同期タスク"""
+# --- スレッド間で共有する状態 ---
+app_running = True
+
+# --- asyncioを別スレッドで実行するためのクラス ---
+class AsyncioThread(threading.Thread):
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.loop = asyncio.new_event_loop()
+
+    def run(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+    def stop(self):
+        self.loop.call_soon_threadsafe(self.loop.stop)
+
+    def create_task(self, coro):
+        return asyncio.run_coroutine_threadsafe(coro, self.loop)
+
+# --- asyncioスレッドで実行される非同期関数 ---
+async def run_join_command(node_id_str: str):
+    global hypha_instance, hypha_connection, running_task
     try:
-        while True:
-            # GUIの状態を更新
-            root.update()
-            root.update_idletasks()
-            # asyncioのイベントループに制御を少し戻す
-            await asyncio.sleep(0.02)  # 20msごとに更新
-    except tk.TclError:
-        # ウィンドウが閉じられたときに発生するエラーを捕捉
-        pass
+        target_node_id = hypha_py.NodeId(node_id_str)
+        secret = hypha_py.Secret()
+        instance = await hypha_py.Instance.bind(secret)
+        hypha_instance = instance
 
-# --- メインロジック ---
+        connection = await instance.connect(instance, target_node_id)
+        hypha_connection = connection
 
-def copy_id(root, host_id_label, status_label):
+        await output_queue.put(f"Connected to {node_id_str}")
+    except Exception as e:
+        await output_queue.put(f"Error: {e}")
+        await output_queue.put("STOP_GUI")
+    finally:
+        running_task = None
+
+
+async def run_host_command():
+    global hypha_instance, hypha_connection, running_task
+    try:
+        secret = hypha_py.Secret()
+        instance = await hypha_py.Instance.bind(secret)
+        hypha_instance = instance
+
+        node_id = secret.node_id()
+        await output_queue.put(f"Your Node ID:{node_id}")
+        await output_queue.put("Waiting for connection...")
+
+        connection = await instance.accept(instance)
+        hypha_connection = connection
+
+        await output_queue.put("Peer connected!")
+    except Exception as e:
+        await output_queue.put(f"Error: {e}")
+        await output_queue.put("STOP_GUI")
+    finally:
+        running_task = None
+
+# --- GUIスレッドで実行される関数 ---
+def check_queue(root: tk.Tk, host_id_label: ttk.Label, status_label: ttk.Label, stop_func):
+    """GUIスレッドからキューをチェックして画面を更新する."""
+    try:
+        while not output_queue.empty():
+            message = output_queue.get_nowait()
+            if message == "STOP_GUI":
+                stop_func()
+            elif message.startswith("Your Node ID:"):
+                your_id = message.split(":", 1)[1].strip()
+                host_id_label.config(text=your_id)
+                status_label.config(text="Waiting for connection...")
+            else:
+                status_label.config(text=message)
+    finally:
+        if app_running:
+            root.after(100, lambda: check_queue(root, host_id_label, status_label, stop_func))
+
+
+def copy_id(root: tk.Tk, host_id_label: ttk.Label, status_label: ttk.Label):
     your_id = host_id_label.cget("text")
     if your_id:
         root.clipboard_clear()
         root.clipboard_append(your_id)
         status_label.config(text=f"ID: {your_id} is copied!")
 
-def join(id_entry, host_button, join_button, status_label):
-    """「Join」ボタンの処理。接続タスクを開始する"""
+
+def join(asyncio_thread: AsyncioThread, id_entry: ttk.Entry, host_button: ttk.Button, join_button: ttk.Button, status_label: ttk.Label):
     global running_task
     node_id_str = id_entry.get()
     if node_id_str and not running_task:
         status_label.config(text=f"Connecting to Node {node_id_str}...")
-        # 接続処理を非同期タスクとして開始
-        running_task = asyncio.create_task(run_join_command(node_id_str))
+        running_task = asyncio_thread.create_task(run_join_command(node_id_str))
         host_button.config(state="disabled")
         join_button.config(state="disabled")
 
-async def run_join_command(node_id_str: str):
-    """バックグラウンドで指定されたNodeに非同期で接続する"""
-    global hypha_instance, hypha_connection, close_handles
-    try:
-        target_node_id = hypha_py.NodeId(node_id_str)
-        secret = hypha_py.Secret()
-        # awaitを使って非同期メソッドを呼び出す
-        instance = await hypha_py.Instance.bind(secret)
-        hypha_instance = instance
-        # close_handles.append(instance.close_handle()) # Note: close_handleの仕様による
 
-        # awaitを使って非同期メソッドを呼び出す
-        connection = await instance.connect(instance, target_node_id)
-        hypha_connection = connection
-        # close_handles.append(connection.close_handle())
-
-        await output_queue.put(f"Connected to {node_id_str}")
-        
-        # 音声ストリームを開始
-        # play_stream = await connection.play()
-        # record_stream = await connection.record()
-
-    except Exception as e:
-        await output_queue.put(f"Error: {e}")
-        await output_queue.put("STOP") # エラー発生時に状態をリセット
-
-def host(host_button, join_button):
-    """「Host」ボタンの処理。ホストタスクを開始する"""
+def host(asyncio_thread: AsyncioThread, host_button: ttk.Button, join_button: ttk.Button):
     global running_task
     if not running_task:
-        # ホスト処理を非同期タスクとして開始
-        running_task = asyncio.create_task(run_host_command())
+        running_task = asyncio_thread.create_task(run_host_command())
         host_button.config(state="disabled")
         join_button.config(state="disabled")
 
-async def run_host_command():
-    """バックグラウンドでホストとして非同期で接続を待ち受ける"""
-    global hypha_instance, hypha_connection, close_handles
-    try:
-        secret = hypha_py.Secret()
-        # awaitを使って非同期メソッドを呼び出す
-        instance = await hypha_py.Instance.bind(secret)
-        hypha_instance = instance
-        # close_handles.append(instance.close_handle())
 
-        node_id = secret.node_id()
-        await output_queue.put(f"Your Node ID:{node_id}")
-        await output_queue.put("Waiting for connection...")
-        
-        # awaitを使って非同期で接続を待ち受ける
-        connection = await instance.accept(instance)
-        hypha_connection = connection
-        # close_handles.append(connection.close_handle())
-        
-        await output_queue.put("Peer connected!")
-
-        # 音声ストリームを開始
-        # play_stream = await connection.play()
-        # record_stream = await connection.record()
-
-    except Exception as e:
-        await output_queue.put(f"Error: {e}")
-        await output_queue.put("STOP") # エラー発生時に状態をリセット
-
-async def check_queue(host_id_label, status_label, stop_func):
-    """キューを定期的にチェックしてGUIを更新する非同期タスク"""
-    while True:
-        message = await output_queue.get()
-        if message == "STOP":
-            stop_func()
-        elif isinstance(message, str) and message.startswith("Your Node ID:"):
-            your_id = message.split(":")[1].strip()
-            host_id_label.config(text=your_id)
-            status_label.config(text="Waiting for connection...")
-        else:
-            status_label.config(text=message)
-        # キューの処理が完了したことを通知
-        output_queue.task_done()
-
-def stop(host_button, join_button, host_id_label, status_label):
-    """「Stop」ボタンの処理"""
-    global running_task, hypha_instance, hypha_connection, close_handles
-    
-    if running_task:
-        running_task.cancel() # 実行中のタスクをキャンセル
+def stop(host_button: ttk.Button, join_button: ttk.Button, host_id_label: ttk.Label, status_label: ttk.Label):
+    global running_task
+    if running_task and not running_task.done():
+        # asyncioスレッド内のタスクをキャンセル
+        future = running_task
+        future.cancel()
         running_task = None
-    
-    # close()メソッド自体が非同期の可能性もあるが、ここでは同期的に呼び出す
-    for handle in reversed(close_handles):
-        try:
-            handle.close()
-        except Exception as e:
-            print(f"Error closing handle: {e}")
-
-    hypha_instance = None
-    hypha_connection = None
-    close_handles = []
 
     status_label.config(text="Stopped")
     host_id_label.config(text="")
     host_button.config(state="normal")
     join_button.config(state="normal")
 
+def start():
+    """アプリケーションを起動するための同期エントリポイント。"""
+    global app_running
 
-async def main():
-    # --- ウィンドウの作成 ---
+    # --- asyncioスレッドの準備と開始 ---
+    asyncio_thread = AsyncioThread()
+    asyncio_thread.start()
+
+    # --- GUIの準備 ---
     root = tk.Tk()
-    root.title("インターネット電話 (asyncio)")
+    root.title("インターネット電話")
     frame = ttk.Frame(root, padding="10")
     frame.grid(row=0, column=0, sticky="nsew")
 
@@ -168,53 +158,46 @@ async def main():
     id_entry = ttk.Entry(frame, width=50)
     status_label = ttk.Label(frame, text="Waiting")
     host_id_label = ttk.Label(frame, text="", foreground="blue")
-    
-    # --- stop関数を部分適用で作成 ---
-    # stop関数にウィジェットを渡すため、lambdaやfunctools.partialを使う
-    stop_func = lambda: stop(host_button, join_button, host_id_label, status_label)
+    join_button = ttk.Button(frame, text="Join")
+    host_button = ttk.Button(frame, text="Host")
+    copy_button = ttk.Button(frame, text="copy", width=10)
+    stop_button = ttk.Button(frame, text="Stop")
 
-    # --- ウィジェットの配置とコマンド設定 ---
-    join_button = ttk.Button(frame, text="Join", command=lambda: join(id_entry, host_button, join_button, status_label))
-    host_button = ttk.Button(frame, text="Host", command=lambda: host(host_button, join_button))
-    copy_button = ttk.Button(frame, text="copy", command=lambda: copy_id(root, host_id_label, status_label), width=10)
-    stop_button = ttk.Button(frame, text="Stop", command=stop_func)
-    
+    # --- コマンドへの部分適用 ---
+    stop_func = functools.partial(stop, host_button, join_button, host_id_label, status_label)
+    join_button["command"] = functools.partial(join, asyncio_thread, id_entry, host_button, join_button, status_label)
+    host_button["command"] = functools.partial(host, asyncio_thread, host_button, join_button)
+    copy_button["command"] = functools.partial(copy_id, root, host_id_label, status_label)
+    stop_button["command"] = stop_func
+
+    # --- ウィジェットの配置 ---
     id_label.grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
     id_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
     join_button.grid(row=1, column=1, columnspan=2, pady=5, sticky="ew")
     ttk.Label(frame, text="Your ID:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
-    host_id_label.grid(row=2, column=1, columnspan=1, sticky="w", padx=5, pady=5)
+    host_id_label.grid(row=2, column=1, sticky="w", padx=5, pady=5)
     copy_button.grid(row=2, column=2, sticky="w", padx=5, pady=5)
     host_button.grid(row=3, column=1, columnspan=2, pady=5, sticky="ew")
     status_label.grid(row=4, column=0, columnspan=3, pady=10)
     stop_button.grid(row=5, column=1, columnspan=2, pady=10, sticky="ew")
-    
     root.columnconfigure(0, weight=1)
     frame.columnconfigure(1, weight=1)
 
-    # --- asyncioタスクの開始 ---
-    tk_task = asyncio.create_task(run_tk(root))
-    queue_task = asyncio.create_task(check_queue(host_id_label, status_label, stop_func))
-
+    # --- 終了処理 ---
     def on_closing():
-        # タスクをキャンセルしてからウィンドウを閉じる
-        tk_task.cancel()
-        queue_task.cancel()
-        if running_task:
-            running_task.cancel()
-        # asyncioループを止めるためにroot.quit()を使う
-        root.quit()
+        global app_running
+        app_running = False
+        stop_func()  # 実行中のタスクがあればキャンセル
+        asyncio_thread.stop() # asyncioスレッドを停止
+        root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_closing)
 
-    # Tkinterのタスクが完了するまで（ウィンドウが閉じられるまで）待機
-    await tk_task
+    # --- GUIスレッドからキューのポーリングを開始 ---
+    root.after(100, lambda: check_queue(root, host_id_label, status_label, stop_func))
 
+    # --- Tkinterのメインループを開始 ---
+    root.mainloop()
 
-if __name__ == '__main__':
-    # asyncioのイベントループを開始
-    try:
-        asyncio.run(main())
-    except asyncio.CancelledError:
-        # プログラム終了時のキャンセルエラーは無視
-        pass
+if __name__ == "__main__":
+    start()
