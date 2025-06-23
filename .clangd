@@ -1,6 +1,5 @@
 CompileFlags:
   Add:
-    - -std=c++23
     - -Weverything
 Diagnostics:
   Suppress:
@@ -14,3 +13,11 @@ Diagnostics:
     - -Wunsafe-buffer-usage
     - -Wvla
     - -Wzero-as-null-pointer-constant
+
+---
+
+If:
+  PathMatch: .*\.cpp
+CompileFlags:
+  Add:
+    - -std=c++23
