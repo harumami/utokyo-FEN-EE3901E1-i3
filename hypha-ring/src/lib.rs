@@ -1,0 +1,40 @@
+use {
+    ::futures::task::AtomicWaker,
+    ::std::{
+        cell::UnsafeCell,
+        mem::MaybeUninit,
+        sync::{
+            Arc,
+            atomic::{
+                AtomicBool,
+                AtomicUsize,
+                Ordering,
+            },
+        },
+    },
+};
+
+pub struct Ring<T> {
+    inner: Arc<Inner<T>>,
+}
+
+struct Inner<T> {
+    producer: AtomicBool,
+    consumer: AtomicBool,
+    waker: AtomicWaker,
+    head: AtomicUsize,
+    tail: AtomicUsize,
+    values: UnsafeCell<Box<[MaybeUninit<T>]>>,
+}
+
+impl<T> Drop for Inner<T> {
+    fn drop(&mut self) {
+        let head = self.head.load(Ordering::Acquire);
+        let tail = self.tail.load(Ordering::Acquire);
+        let values = self.values.get_mut();
+
+        for i in head..tail {
+            unsafe { values[i].assume_init_drop() };
+        }
+    }
+}
