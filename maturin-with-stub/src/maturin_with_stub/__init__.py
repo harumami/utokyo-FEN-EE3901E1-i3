@@ -46,7 +46,7 @@ def stub_gen(*, release: bool) -> None:
         ):
             path = pathlib.PurePath(instance["path"])
             paths.append(path.parent)
-            paths.append(path.parent / "lib")
+            paths.append(path.parent.parent / "lib")
 
         env = os.environ.copy()
         paths.append(env["PATH"])
