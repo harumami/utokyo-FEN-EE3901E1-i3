@@ -22,6 +22,7 @@ use {
         FromSample,
         I24,
         ToSample,
+        Sample,
     },
     ::iroh::{
         KeyParsingError,
@@ -236,6 +237,21 @@ impl Instance {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct MuteHandle {
+    inner: Arc<AtomicBool>,
+}
+
+impl MuteHandle {
+    pub fn toggle(&self) {
+        let old = self.inner.fetch_xor(true, Ordering::Relaxed);
+        debug!("toggled mute: {}", !old);
+    }
+    pub fn is_muted(&self) -> bool {
+        self.inner.load(Ordering::Relaxed)
+    }
+}
+
 #[derive(Debug)]
 pub struct Connection<E> {
     rec_ring: Arc<RingBuffer<[f32; 2]>>,
@@ -243,7 +259,7 @@ pub struct Connection<E> {
     close_handle: Arc<CloseHandle>,
     send_handle: JoinHandle<Result<(), E>>,
     recv_handle: JoinHandle<Result<(), E>>,
-    is_muted: Arc<AtomicBool>,
+    mute_handle: MuteHandle,
 }
 
 impl<E0> Connection<E0> {
@@ -259,13 +275,8 @@ impl<E0> Connection<E0> {
         &self.close_handle
     }
 
-    pub fn toggle_mute(&self) {
-        let old = self.is_muted.fetch_xor(true, Ordering::Relaxed);
-        debug!("toggled mute: {}", !old);
-    }
-
-    pub fn is_muted(&self) -> bool {
-        self.is_muted.load(Ordering::Relaxed)
+    pub fn mute_handle(&self) -> MuteHandle {
+        self.mute_handle.clone()
     }
 }
 
@@ -277,12 +288,12 @@ impl<E0: Source> Connection<E0> {
         let rec_ring = Arc::new(RingBuffer::new(Instance::RING_SIZE));
         let play_ring = Arc::new(RingBuffer::new(Instance::RING_SIZE));
         let close_handle = Arc::new(CloseHandle::new());
-        let is_muted = Arc::new(AtomicBool::new(false));
+        let mute_handle = MuteHandle { inner: Arc::new(AtomicBool::new(false)) };
 
         let send_handle = {
             let rec_ring = rec_ring.clone();
             let close_handle = close_handle.clone();
-            let is_muted = is_muted.clone();
+            let mute_handle = mute_handle.clone();
 
             spawn(async move {
                 let mut encoder = Encoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS)?;
@@ -299,12 +310,13 @@ impl<E0: Source> Connection<E0> {
                             100. * rec_ring.len() as f32 / rec_ring.capacity() as f32,
                         );
 
-                        let mut samples: Vec<_> = rec_ring.drain().flatten().collect();
-
-                        if is_muted.load(Ordering::Relaxed) {
-                            samples.fill(0.);
-                        }
-
+                        let samples = rec_ring.drain().flatten().map(|s| {
+                            if mute_handle.is_muted() {
+                                f32::EQUILIBRIUM
+                            } else {
+                                s
+                            }
+                        });
                         encoder.input().extend(samples);
 
                         while encoder.ready(Instance::FRAME_SIZE) {
@@ -383,7 +395,7 @@ impl<E0: Source> Connection<E0> {
             close_handle,
             send_handle,
             recv_handle,
-            is_muted,
+            mute_handle,
         })
     }
 
