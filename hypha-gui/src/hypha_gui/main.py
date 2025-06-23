@@ -1,203 +1,154 @@
-# ruff: noqa: E501
-import asyncio
-import functools
 import tkinter as tk
-import typing
-import threading
 from tkinter import ttk
+import subprocess
+import threading
+import queue
 
-# hypha_pyのスタブをインポート
-# ruff: noqa: F401
-import hypha_py
-
-# asyncio用のキューを使用
-# GUIスレッドとasyncioスレッド間で安全に通信するために使用
-output_queue: asyncio.Queue[str] = asyncio.Queue()
-
-# --- グローバル変数 ---
-# これらはasyncioスレッドで管理される
-hypha_instance: typing.Optional["hypha_py.Instance"] = None
-hypha_connection: typing.Optional["hypha_py.Connection"] = None
-close_handles: list["hypha_py.CloseHandle"] = []
-running_task: typing.Optional[asyncio.Task] = None
-
-# --- スレッド間で共有する状態 ---
-app_running = True
-
-# --- asyncioを別スレッドで実行するためのクラス ---
-class AsyncioThread(threading.Thread):
-    def __init__(self):
-        super().__init__(daemon=True)
-        self.loop = asyncio.new_event_loop()
-
-    def run(self):
-        asyncio.set_event_loop(self.loop)
-        self.loop.run_forever()
-
-    def stop(self):
-        self.loop.call_soon_threadsafe(self.loop.stop)
-
-    def create_task(self, coro):
-        return asyncio.run_coroutine_threadsafe(coro, self.loop)
-
-# --- asyncioスレッドで実行される非同期関数 ---
-async def run_join_command(node_id_str: str):
-    global hypha_instance, hypha_connection, running_task
-    try:
-        target_node_id = hypha_py.NodeId(node_id_str)
-        secret = hypha_py.Secret()
-        instance = await hypha_py.Instance.bind(secret)
-        hypha_instance = instance
-
-        connection = await instance.connect(instance, target_node_id)
-        hypha_connection = connection
-
-        await output_queue.put(f"Connected to {node_id_str}")
-    except Exception as e:
-        await output_queue.put(f"Error: {e}")
-        await output_queue.put("STOP_GUI")
-    finally:
-        running_task = None
+process = None
+output_queue = queue.Queue()
 
 
-async def run_host_command():
-    global hypha_instance, hypha_connection, running_task
-    try:
-        secret = hypha_py.Secret()
-        instance = await hypha_py.Instance.bind(secret)
-        hypha_instance = instance
-
-        node_id = secret.node_id()
-        await output_queue.put(f"Your Node ID:{node_id}")
-        await output_queue.put("Waiting for connection...")
-
-        connection = await instance.accept(instance)
-        hypha_connection = connection
-
-        await output_queue.put("Peer connected!")
-    except Exception as e:
-        await output_queue.put(f"Error: {e}")
-        await output_queue.put("STOP_GUI")
-    finally:
-        running_task = None
-
-# --- GUIスレッドで実行される関数 ---
-def check_queue(root: tk.Tk, host_id_label: ttk.Label, status_label: ttk.Label, stop_func):
-    """GUIスレッドからキューをチェックして画面を更新する."""
-    try:
-        while not output_queue.empty():
-            message = output_queue.get_nowait()
-            if message == "STOP_GUI":
-                stop_func()
-            elif message.startswith("Your Node ID:"):
-                your_id = message.split(":", 1)[1].strip()
-                host_id_label.config(text=your_id)
-                status_label.config(text="Waiting for connection...")
-            else:
-                status_label.config(text=message)
-    finally:
-        if app_running:
-            root.after(100, lambda: check_queue(root, host_id_label, status_label, stop_func))
-
-
-def copy_id(root: tk.Tk, host_id_label: ttk.Label, status_label: ttk.Label):
+def copy_id():
+    # host_id_labelから現在のIDテキストを取得
     your_id = host_id_label.cget("text")
     if your_id:
-        root.clipboard_clear()
-        root.clipboard_append(your_id)
+        root.clipboard_clear()  # クリップボードをクリア
+        root.clipboard_append(your_id)  # クリップボードにIDを追加
         status_label.config(text=f"ID: {your_id} is copied!")
 
+def join():
+    global process
+    node_id = id_entry.get()
+    if node_id and not process:
+        process = subprocess.Popen(["./../target/debug/hypha-cli","join", node_id])
+        status_label.config(text=f"connecting to Node {node_id}")
 
-def join(asyncio_thread: AsyncioThread, id_entry: ttk.Entry, host_button: ttk.Button, join_button: ttk.Button, status_label: ttk.Label):
-    global running_task
-    node_id_str = id_entry.get()
-    if node_id_str and not running_task:
-        status_label.config(text=f"Connecting to Node {node_id_str}...")
-        running_task = asyncio_thread.create_task(run_join_command(node_id_str))
+
+def host():
+    """「Host」ボタンの処理。コマンド実行を別スレッドで開始する"""
+    global process
+    if not process:
+        # コマンド実行を別スレッドで開始
+        # daemon=Trueにすると、メインプログラム終了時にスレッドも終了する
+        thread = threading.Thread(target=run_host_command, daemon=True)
+        thread.start()
+        # 実行中はボタンを無効化する
         host_button.config(state="disabled")
         join_button.config(state="disabled")
 
 
-def host(asyncio_thread: AsyncioThread, host_button: ttk.Button, join_button: ttk.Button):
-    global running_task
-    if not running_task:
-        running_task = asyncio_thread.create_task(run_host_command())
-        host_button.config(state="disabled")
-        join_button.config(state="disabled")
+def run_host_command():
+    """バックグラウンドスレッドでホストコマンドを実行し、出力をキューに入れる"""
+    global process
+    host_command = ["./../target/debug/hypha-cli","host"]
+
+    try:
+        process = subprocess.Popen(
+            host_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, # エラー出力も標準出力にまとめる
+            text=True,
+            encoding='utf-8',
+            bufsize=1 # 行単位のバッファリングを強制
+        )
+        
+        # プロセスの出力を1行ずつ読み取り、キューに入れる
+        for line in iter(process.stdout.readline, ''):
+            if line:
+                output_queue.put(line.strip()) # strip()で不要な改行を削除
+        
+        process.stdout.close()
+        process.wait()
+
+    except FileNotFoundError:
+        output_queue.put("エラー: 指定されたコマンドが見つかりません。")
+    except Exception as e:
+        output_queue.put(f"エラー: {e}")
+    finally:
+        # 処理完了後にキューに目印を入れる
+        output_queue.put(None)
 
 
-def stop(host_button: ttk.Button, join_button: ttk.Button, host_id_label: ttk.Label, status_label: ttk.Label):
-    global running_task
-    if running_task and not running_task.done():
-        # asyncioスレッド内のタスクをキャンセル
-        future = running_task
-        future.cancel()
-        running_task = None
+def check_queue():
+    """キューを定期的にチェックしてGUIを更新する"""
+    try:
+        while True:
+            # キューからノンブロッキングでデータを取得
+            message = output_queue.get_nowait()
+            
+            if message is None: # 処理完了の目印を受け取った場合
+                stop() # プロセスが正常終了した場合もstop()を呼んで状態をリセット
+                break
+            
+            # メッセージの内容に応じて表示を分ける
+            if message.startswith("Your Node ID:"):
+                # "Your ID :" ラベルを更新
+                your_id = message.split(":")[1].strip()
+                host_id_label.config(text=your_id)
+            else:
+                # "status_label" を更新
+                status_label.config(text=message)
 
+    except queue.Empty: # キューが空の場合は何もしない
+        pass
+    finally:
+        # 100ミリ秒後に再度この関数を実行する
+        root.after(100, check_queue)
+
+def stop():
+    """「Stop」ボタンの処理"""
+    global process
+    if process:
+        process.terminate() # プロセスを終了
+        process = None
     status_label.config(text="Stopped")
-    host_id_label.config(text="")
+    host_id_label.config(text="") # ID表示をリセット
+    # ボタンを再度有効化する
     host_button.config(state="normal")
     join_button.config(state="normal")
 
-def start():
-    """アプリケーションを起動するための同期エントリポイント。"""
-    global app_running
 
-    # --- asyncioスレッドの準備と開始 ---
-    asyncio_thread = AsyncioThread()
-    asyncio_thread.start()
+# --- ウィンドウの作成 ---
+root = tk.Tk()
+root.title("インターネット電話")
 
-    # --- GUIの準備 ---
-    root = tk.Tk()
-    root.title("インターネット電話")
-    frame = ttk.Frame(root, padding="10")
-    frame.grid(row=0, column=0, sticky="nsew")
+frame = ttk.Frame(root, padding="10")
+frame.grid(row=0, column=0, sticky="nsew")
 
-    # --- ウィジェットの作成 ---
-    id_label = ttk.Label(frame, text="Node ID:")
-    id_entry = ttk.Entry(frame, width=50)
-    status_label = ttk.Label(frame, text="Waiting")
-    host_id_label = ttk.Label(frame, text="", foreground="blue")
-    join_button = ttk.Button(frame, text="Join")
-    host_button = ttk.Button(frame, text="Host")
-    copy_button = ttk.Button(frame, text="copy", width=10)
-    stop_button = ttk.Button(frame, text="Stop")
+# --- ウィジェットの配置 ---
+id_label = ttk.Label(frame, text="Node ID:")
+id_label.grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+id_entry = ttk.Entry(frame, width=50)
+id_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
 
-    # --- コマンドへの部分適用 ---
-    stop_func = functools.partial(stop, host_button, join_button, host_id_label, status_label)
-    join_button["command"] = functools.partial(join, asyncio_thread, id_entry, host_button, join_button, status_label)
-    host_button["command"] = functools.partial(host, asyncio_thread, host_button, join_button)
-    copy_button["command"] = functools.partial(copy_id, root, host_id_label, status_label)
-    stop_button["command"] = stop_func
+join_button = ttk.Button(frame, text="Join", command=join)
+join_button.grid(row=1, column=1, columnspan=2, pady=5, sticky="ew")
 
-    # --- ウィジェットの配置 ---
-    id_label.grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
-    id_entry.grid(row=0, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
-    join_button.grid(row=1, column=1, columnspan=2, pady=5, sticky="ew")
-    ttk.Label(frame, text="Your ID:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
-    host_id_label.grid(row=2, column=1, sticky="w", padx=5, pady=5)
-    copy_button.grid(row=2, column=2, sticky="w", padx=5, pady=5)
-    host_button.grid(row=3, column=1, columnspan=2, pady=5, sticky="ew")
-    status_label.grid(row=4, column=0, columnspan=3, pady=10)
-    stop_button.grid(row=5, column=1, columnspan=2, pady=10, sticky="ew")
-    root.columnconfigure(0, weight=1)
-    frame.columnconfigure(1, weight=1)
+host_id_title_label = ttk.Label(frame, text="Your ID:")
+host_id_title_label.grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+# ID表示用のラベルを分ける
+host_id_label = ttk.Label(frame, text="", foreground="blue")
+host_id_label.grid(row=2, column=1, columnspan=1, sticky="w", padx=5, pady=5)
 
-    # --- 終了処理 ---
-    def on_closing():
-        global app_running
-        app_running = False
-        stop_func()  # 実行中のタスクがあればキャンセル
-        asyncio_thread.stop() # asyncioスレッドを停止
-        root.destroy()
+copy_button = ttk.Button(frame, text="copy", command=copy_id, width=10)
+copy_button.grid(row=2, column=2, sticky="w", padx=5, pady=5)
 
-    root.protocol("WM_DELETE_WINDOW", on_closing)
+host_button = ttk.Button(frame, text="Host", command=host)
+host_button.grid(row=3, column=1, columnspan=2, pady=5, sticky="ew")
 
-    # --- GUIスレッドからキューのポーリングを開始 ---
-    root.after(100, lambda: check_queue(root, host_id_label, status_label, stop_func))
+status_label = ttk.Label(frame, text="Waiting")
+status_label.grid(row=4, column=0, columnspan=2, pady=10)
 
-    # --- Tkinterのメインループを開始 ---
-    root.mainloop()
+stop_button = ttk.Button(frame, text="Stop", command=stop)
+stop_button.grid(row=5, column=1, columnspan=2, pady=10, sticky="ew")
 
-if __name__ == "__main__":
-    start()
+# ウィンドウのリサイズに対応
+root.columnconfigure(0, weight=1)
+frame.columnconfigure(1, weight=1)
+
+# キューの監視を開始
+check_queue()
+
+root.mainloop()
+
+
