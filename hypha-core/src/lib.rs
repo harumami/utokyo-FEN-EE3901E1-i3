@@ -33,17 +33,9 @@ use {
             SendStream,
         },
     },
-    ::opus_sys::{
-        OPUS_APPLICATION_VOIP,
-        OpusDecoder,
-        OpusEncoder,
-        opus_decode_float,
-        opus_decoder_create,
-        opus_decoder_destroy,
-        opus_encode_float,
-        opus_encoder_create,
-        opus_encoder_destroy,
-        opus_strerror,
+    ::opus_rs::{
+        Decoder,
+        Encoder,
     },
     ::rancor::{
         OptionExt as _,
@@ -279,7 +271,9 @@ impl<E0: Source> Connection<E0> {
             let close_handle = close_handle.clone();
 
             spawn(async move {
-                let mut encoder = Encoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS)?;
+                let mut encoder =
+                    Encoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS).into_error()?;
+
                 debug!("start record loop");
 
                 let rec_loop = async {
@@ -296,9 +290,11 @@ impl<E0: Source> Connection<E0> {
                         encoder.input().extend(rec_ring.drain().flatten());
 
                         while encoder.ready(Instance::FRAME_SIZE) {
-                            encoder.encode(Instance::FRAME_SIZE, Instance::MAX_PACKET_SIZE)?;
+                            encoder
+                                .encode(Instance::FRAME_SIZE, Instance::MAX_PACKET_SIZE)
+                                .into_error()?;
 
-                            if !encoder.output.is_empty() {
+                            if !encoder.output().is_empty() {
                                 debug!("send opus packet");
                                 let len = (encoder.output().len() as u32).to_le_bytes();
                                 send_stream.write_all(&len).await.into_error()?;
@@ -328,7 +324,9 @@ impl<E0: Source> Connection<E0> {
             let close_handle = close_handle.clone();
 
             spawn(async move {
-                let mut decoder = Decoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS)?;
+                let mut decoder =
+                    Decoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS).into_error()?;
+
                 debug!("start play loop");
 
                 let play_loop = async {
@@ -338,7 +336,7 @@ impl<E0: Source> Connection<E0> {
                         recv_stream.read_exact(&mut len).await.into_error()?;
                         decoder.input().resize(u32::from_le_bytes(len) as _, 0);
                         recv_stream.read_exact(decoder.input()).await.into_error()?;
-                        decoder.decode(Instance::MAX_FRAME_SIZE)?;
+                        decoder.decode(Instance::MAX_FRAME_SIZE).into_error()?;
 
                         play_ring
                             .extend(decoder.output().chunks(2).map(|frame| [frame[0], frame[1]]));
@@ -783,161 +781,6 @@ impl<T> Deref for ThreadBound<T> {
         &self.value
     }
 }
-
-#[derive(Debug)]
-struct Encoder {
-    raw: *mut OpusEncoder,
-    channels: u32,
-    input: Vec<f32>,
-    output: Vec<u8>,
-}
-
-impl Encoder {
-    fn new<E: Source>(sample_rate: u32, channels: u32) -> Result<Self, E> {
-        let mut error = 0;
-
-        let raw = unsafe {
-            opus_encoder_create(
-                sample_rate as _,
-                channels as _,
-                OPUS_APPLICATION_VOIP as _,
-                &mut error,
-            )
-        };
-
-        OpusError::new(error).into_error()?;
-
-        Result::Ok(Self {
-            raw,
-            channels,
-            input: Vec::new(),
-            output: Vec::new(),
-        })
-    }
-
-    fn input(&mut self) -> &mut Vec<f32> {
-        &mut self.input
-    }
-
-    fn output(&self) -> &[u8] {
-        &self.output
-    }
-
-    fn ready(&self, frame_size: usize) -> bool {
-        self.input.len() >= self.channels as usize * frame_size
-    }
-
-    fn encode<E: Source>(&mut self, frame_size: usize, max_packet_size: usize) -> Result<(), E> {
-        self.output.resize(max_packet_size, 0);
-
-        let size = unsafe {
-            opus_encode_float(
-                self.raw,
-                self.input.as_ptr(),
-                frame_size as _,
-                self.output.as_mut_ptr(),
-                self.output.len() as _,
-            )
-        };
-
-        OpusError::new(size).into_error()?;
-        self.input.drain(0..self.channels as usize * frame_size);
-        self.output.truncate(size as _);
-        Result::Ok(())
-    }
-}
-
-impl Drop for Encoder {
-    fn drop(&mut self) {
-        unsafe { opus_encoder_destroy(self.raw) };
-    }
-}
-
-unsafe impl Send for Encoder {}
-
-#[derive(Debug)]
-struct Decoder {
-    raw: *mut OpusDecoder,
-    channels: u32,
-    input: Vec<u8>,
-    output: Vec<f32>,
-}
-
-impl Decoder {
-    fn new<E: Source>(sample_rate: u32, channels: u32) -> Result<Self, E> {
-        let mut error = 0;
-        let raw = unsafe { opus_decoder_create(sample_rate as _, channels as _, &mut error) };
-        OpusError::new(error).into_error()?;
-
-        Result::Ok(Self {
-            raw,
-            channels,
-            input: Vec::new(),
-            output: Vec::new(),
-        })
-    }
-
-    fn input(&mut self) -> &mut Vec<u8> {
-        &mut self.input
-    }
-
-    fn output(&self) -> &[f32] {
-        &self.output
-    }
-
-    fn decode<E: Source>(&mut self, max_frame_size: usize) -> Result<(), E> {
-        self.output.resize(max_frame_size, 0.0);
-
-        let frames = unsafe {
-            opus_decode_float(
-                self.raw,
-                self.input.as_ptr(),
-                self.input.len() as _,
-                self.output.as_mut_ptr(),
-                max_frame_size as _,
-                0,
-            )
-        };
-
-        OpusError::new(frames).into_error()?;
-
-        self.output
-            .truncate(self.channels as usize * frames as usize);
-
-        Result::Ok(())
-    }
-}
-
-impl Drop for Decoder {
-    fn drop(&mut self) {
-        unsafe { opus_decoder_destroy(self.raw) };
-    }
-}
-
-unsafe impl Send for Decoder {}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-struct OpusError(c_int);
-
-impl OpusError {
-    fn new(error: c_int) -> Result<(), Self> {
-        match error {
-            0.. => Result::Ok(()),
-            ..0 => Result::Err(Self(error)),
-        }
-    }
-}
-
-impl Display for OpusError {
-    fn fmt(&self, f: &mut Formatter) -> FmtResult {
-        match unsafe { CStr::from_ptr(opus_strerror(self.0)) }.to_str() {
-            Result::Ok(error) => write!(f, "opus: {}", error),
-            Result::Err(error) => write!(f, "opus: {}", error),
-        }
-    }
-}
-
-impl Error for OpusError {}
 
 #[derive(Debug)]
 struct Resampler {
