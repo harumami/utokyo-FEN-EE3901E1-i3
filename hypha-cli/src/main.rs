@@ -19,8 +19,14 @@ use {
             stderr,
         },
         process::ExitCode,
+        sync::Arc,
     },
     ::tokio::{
+        io::{
+            AsyncBufReadExt as _,
+            BufReader,
+            stdin,
+        },
         runtime::Runtime,
         signal::ctrl_c,
     },
@@ -139,6 +145,8 @@ fn run(command: Command) -> Result<(), BoxedError> {
         },
     };
 
+    let connection = Arc::new(connection);
+
     let _recorder = match connection.record::<BoxedError, BoxedError>() {
         Result::Ok(recorder) => Option::Some(recorder),
         Result::Err(error) => {
@@ -166,9 +174,43 @@ fn run(command: Command) -> Result<(), BoxedError> {
         close_handle.close();
     });
 
-    println!("Let's talk!");
-    runtime.block_on(connection.join())?;
-    println!("Bye.");
+    let input_connection = connection.clone();
+    let input_close_handle = connection.close_handle().clone();
+
+    runtime.spawn(async move {
+        let mut reader = BufReader::new(stdin());
+        let mut line = String::new();
+
+        loop {
+            tokio::select! {
+                _ = input_close_handle.wait() => break,
+                result = reader.read_line(&mut line) => match result {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if line.trim() == "m" {
+                            input_connection.toggle_mute();
+
+                            if input_connection.is_muted() {
+                                println!("\n[ MUTED ]");
+                            } else {
+                                println!("\n[ UNMUTED ]");
+                            }
+                        }
+
+                        line.clear();
+                    }
+                    Err(error) => {
+                        warn!(error = &error as &dyn Error);
+                        break;
+                    },
+                },
+            }
+        }
+    });
+
+    println!("Let's talk! (press 'm' and enter to mute, ctrl+c to exit)");
+    runtime.block_on(connection.close_handle().wait());
+    println!("\nBye.");
     runtime.block_on(instance.close());
     Result::Ok(())
 }
