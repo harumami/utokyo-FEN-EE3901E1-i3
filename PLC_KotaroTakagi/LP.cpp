@@ -65,20 +65,4 @@ extern "C" {
         }
         std::cout << std::endl;
     }
-
-    /*int main(){
-        float p_in[p];
-        float s_in[N] = {3,1,4,1,5,9,2,6,5,3,5,9,7,9,3,2,3,8,4,6};
-        
-        print_p(s_in, "s_in:", N);
-        
-        
-        toLP(p_in, s_in); 
-        print_p(p_in, "a:", p);
-        print_p(s_in, "e:", N);
-        fromLP(p_in, s_in);
-        print_p(s_in, "recover:",N);
-                
-        return 0;
-    }*/
 }
