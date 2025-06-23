@@ -76,7 +76,13 @@ use {
         marker::PhantomData,
         ops::Deref,
         str::FromStr,
-        sync::Arc,
+        sync::{
+            atomic::{
+                AtomicBool,
+                Ordering,
+            },
+            Arc,
+        },
     },
     ::tokio::{
         select,
@@ -237,6 +243,7 @@ pub struct Connection<E> {
     close_handle: Arc<CloseHandle>,
     send_handle: JoinHandle<Result<(), E>>,
     recv_handle: JoinHandle<Result<(), E>>,
+    is_muted: Arc<AtomicBool>,
 }
 
 impl<E0> Connection<E0> {
@@ -251,6 +258,15 @@ impl<E0> Connection<E0> {
     pub fn close_handle(&self) -> &Arc<CloseHandle> {
         &self.close_handle
     }
+
+    pub fn toggle_mute(&self) {
+        let old = self.is_muted.fetch_xor(true, Ordering::Relaxed);
+        debug!("toggled mute: {}", !old);
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.is_muted.load(Ordering::Relaxed)
+    }
 }
 
 impl<E0: Source> Connection<E0> {
@@ -261,10 +277,12 @@ impl<E0: Source> Connection<E0> {
         let rec_ring = Arc::new(RingBuffer::new(Instance::RING_SIZE));
         let play_ring = Arc::new(RingBuffer::new(Instance::RING_SIZE));
         let close_handle = Arc::new(CloseHandle::new());
+        let is_muted = Arc::new(AtomicBool::new(false));
 
         let send_handle = {
             let rec_ring = rec_ring.clone();
             let close_handle = close_handle.clone();
+            let is_muted = is_muted.clone();
 
             spawn(async move {
                 let mut encoder = Encoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS)?;
@@ -281,7 +299,13 @@ impl<E0: Source> Connection<E0> {
                             100. * rec_ring.len() as f32 / rec_ring.capacity() as f32,
                         );
 
-                        encoder.input().extend(rec_ring.drain().flatten());
+                        let mut samples: Vec<_> = rec_ring.drain().flatten().collect();
+
+                        if is_muted.load(Ordering::Relaxed) {
+                            samples.fill(0.);
+                        }
+
+                        encoder.input().extend(samples);
 
                         while encoder.ready(Instance::FRAME_SIZE) {
                             encoder.encode(Instance::FRAME_SIZE, Instance::MAX_PACKET_SIZE)?;
@@ -359,6 +383,7 @@ impl<E0: Source> Connection<E0> {
             close_handle,
             send_handle,
             recv_handle,
+            is_muted,
         })
     }
 
@@ -690,7 +715,7 @@ impl CloseHandle {
         self.notify.notify_waiters();
     }
 
-    async fn wait(&self) {
+    pub async fn wait(&self) {
         self.notify.notified().await;
     }
 }
