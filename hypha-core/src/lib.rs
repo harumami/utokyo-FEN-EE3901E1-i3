@@ -22,7 +22,6 @@ use {
         FromSample,
         I24,
         ToSample,
-        Sample,
     },
     ::iroh::{
         KeyParsingError,
@@ -78,11 +77,11 @@ use {
         ops::Deref,
         str::FromStr,
         sync::{
+            Arc,
             atomic::{
                 AtomicBool,
                 Ordering,
             },
-            Arc,
         },
     },
     ::tokio::{
@@ -92,7 +91,6 @@ use {
             JoinHandle,
             spawn,
         },
-        sync::watch,
     },
     ::tracing::{
         debug,
@@ -238,46 +236,31 @@ impl Instance {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct MuteHandle {
-    inner: Arc<AtomicBool>,
-}
-
-impl MuteHandle {
-    pub fn toggle(&self) {
-        let old = self.inner.fetch_xor(true, Ordering::Relaxed);
-        debug!("toggled mute: {}", !old);
-    }
-    pub fn is_muted(&self) -> bool {
-        self.inner.load(Ordering::Relaxed)
-    }
-}
-
 #[derive(Debug)]
 pub struct Connection<E> {
     rec_ring: Arc<RingBuffer<[f32; 2]>>,
     play_ring: Arc<RingBuffer<[f32; 2]>>,
+    mute_handle: Arc<MuteHandle>,
     close_handle: Arc<CloseHandle>,
     send_handle: JoinHandle<Result<(), E>>,
     recv_handle: JoinHandle<Result<(), E>>,
-    mute_handle: MuteHandle,
 }
 
 impl<E0> Connection<E0> {
     pub fn record<E1: Source, E2: Source>(&self) -> Result<AudioStream, E1> {
-        AudioStream::record::<_, E2>(self.rec_ring.clone())
+        AudioStream::record::<_, E2>(self.rec_ring.clone(), self.mute_handle.clone())
     }
 
     pub fn play<E1: Source, E2: Source>(&self) -> Result<AudioStream, E1> {
         AudioStream::play::<_, E2>(self.play_ring.clone())
     }
 
-    pub fn close_handle(&self) -> &Arc<CloseHandle> {
-        &self.close_handle
+    pub fn mute_handle(&self) -> &Arc<MuteHandle> {
+        &self.mute_handle
     }
 
-    pub fn mute_handle(&self) -> MuteHandle {
-        self.mute_handle.clone()
+    pub fn close_handle(&self) -> &Arc<CloseHandle> {
+        &self.close_handle
     }
 }
 
@@ -288,13 +271,12 @@ impl<E0: Source> Connection<E0> {
     ) -> Result<Self, E1> {
         let rec_ring = Arc::new(RingBuffer::new(Instance::RING_SIZE));
         let play_ring = Arc::new(RingBuffer::new(Instance::RING_SIZE));
+        let mute_handle = Arc::new(MuteHandle::new());
         let close_handle = Arc::new(CloseHandle::new());
-        let mute_handle = MuteHandle { inner: Arc::new(AtomicBool::new(false)) };
 
         let send_handle = {
             let rec_ring = rec_ring.clone();
             let close_handle = close_handle.clone();
-            let mute_handle = mute_handle.clone();
 
             spawn(async move {
                 let mut encoder = Encoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS)?;
@@ -311,14 +293,7 @@ impl<E0: Source> Connection<E0> {
                             100. * rec_ring.len() as f32 / rec_ring.capacity() as f32,
                         );
 
-                        let samples = rec_ring.drain().flatten().map(|s| {
-                            if mute_handle.is_muted() {
-                                f32::EQUILIBRIUM
-                            } else {
-                                s
-                            }
-                        });
-                        encoder.input().extend(samples);
+                        encoder.input().extend(rec_ring.drain().flatten());
 
                         while encoder.ready(Instance::FRAME_SIZE) {
                             encoder.encode(Instance::FRAME_SIZE, Instance::MAX_PACKET_SIZE)?;
@@ -417,6 +392,49 @@ impl<E0: Source> Connection<E0> {
     }
 }
 
+#[derive(Debug)]
+pub struct MuteHandle {
+    muted: AtomicBool,
+}
+
+impl MuteHandle {
+    fn new() -> Self {
+        Self {
+            muted: AtomicBool::new(false),
+        }
+    }
+
+    pub fn toggle(&self) {
+        let old = self.muted.fetch_xor(true, Ordering::AcqRel);
+        debug!("toggled mute: {}", !old);
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug)]
+pub struct CloseHandle {
+    notify: Notify,
+}
+
+impl CloseHandle {
+    fn new() -> Self {
+        Self {
+            notify: Notify::new(),
+        }
+    }
+
+    pub fn close(&self) {
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        self.notify.notified().await;
+    }
+}
+
 pub struct AudioStream {
     host: Host,
     device: Device,
@@ -424,7 +442,10 @@ pub struct AudioStream {
 }
 
 impl AudioStream {
-    fn record<E0: Source, E1: Source>(ring: Arc<RingBuffer<[f32; 2]>>) -> Result<Self, E0> {
+    fn record<E0: Source, E1: Source>(
+        ring: Arc<RingBuffer<[f32; 2]>>,
+        mute_handle: Arc<MuteHandle>,
+    ) -> Result<Self, E0> {
         let host = default_host();
         debug!("audio host: {:?}", host.id());
         let device = host.default_input_device().into_error()?;
@@ -440,17 +461,39 @@ impl AudioStream {
         debug!("input audio config: {config:?}");
 
         let stream = match config.sample_format() {
-            SampleFormat::I8 => Self::build_input::<i8, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I16 => Self::build_input::<i16, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I24 => Self::build_input::<I24, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I32 => Self::build_input::<i32, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I64 => Self::build_input::<i64, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U8 => Self::build_input::<u8, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U16 => Self::build_input::<u16, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U32 => Self::build_input::<u32, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U64 => Self::build_input::<u64, _, E1>(&device, &config.config(), ring),
-            SampleFormat::F32 => Self::build_input::<f32, _, E1>(&device, &config.config(), ring),
-            SampleFormat::F64 => Self::build_input::<f64, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I8 => {
+                Self::build_input::<i8, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::I16 => {
+                Self::build_input::<i16, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::I24 => {
+                Self::build_input::<I24, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::I32 => {
+                Self::build_input::<i32, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::I64 => {
+                Self::build_input::<i64, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::U8 => {
+                Self::build_input::<u8, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::U16 => {
+                Self::build_input::<u16, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::U32 => {
+                Self::build_input::<u32, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::U64 => {
+                Self::build_input::<u64, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::F32 => {
+                Self::build_input::<f32, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::F64 => {
+                Self::build_input::<f64, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
             format => fail!(AnyError(format!("unknown format: {format}").into())),
         }?;
 
@@ -467,6 +510,7 @@ impl AudioStream {
         device: &Device,
         config: &StreamConfig,
         ring: Arc<RingBuffer<[f32; 2]>>,
+        mute_handle: Arc<MuteHandle>,
     ) -> Result<ThreadBound<Stream>, E0> {
         debug!("build input audio stream");
 
@@ -497,6 +541,11 @@ impl AudioStream {
 
                     if let Result::Err(error) = resampler.resample::<E1>() {
                         error!("{error}");
+                        return;
+                    }
+
+                    if mute_handle.is_muted() {
+                        debug!("stream is muted");
                         return;
                     }
 
@@ -709,32 +758,6 @@ impl<T> RingBuffer<T> {
 
     async fn wait(&self) {
         self.notify.notified().await;
-    }
-}
-
-#[derive(Debug)]
-pub struct CloseHandle {
-    tx: watch::Sender<bool>,
-    rx: watch::Receiver<bool>,
-}
-
-impl CloseHandle {
-    fn new() -> Self {
-        let (tx, rx) = watch::channel(false);
-        Self { tx, rx }
-    }
-
-    pub fn close(&self) {
-        let _ = self.tx.send(true);
-    }
-
-    pub async fn wait(&self) {
-        let mut rx = self.rx.clone();
-        while !*rx.borrow() {
-            if rx.changed().await.is_err() {
-                break;
-            }
-        }
     }
 }
 
