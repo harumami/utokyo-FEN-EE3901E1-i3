@@ -146,8 +146,6 @@ fn run(command: Command) -> Result<(), BoxedError> {
         },
     };
 
-    let connection = Arc::new(connection);
-
     let _recorder = match connection.record::<BoxedError, BoxedError>() {
         Result::Ok(recorder) => Option::Some(recorder),
         Result::Err(error) => {
@@ -176,7 +174,6 @@ fn run(command: Command) -> Result<(), BoxedError> {
         close_handle.close();
     });
 
-    let input_connection = connection.clone();
     let input_close_handle = connection.close_handle().clone();
 
     runtime.spawn(async move {
@@ -211,7 +208,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
     });
 
     println!("Let's talk! (press 'm' and enter to mute, ctrl+c to exit)");
-    runtime.block_on(connection.close_handle().wait());
+    runtime.block_on(connection.join())?;
     println!("\nBye.");
     runtime.block_on(instance.close());
     Result::Ok(())
