@@ -38,6 +38,7 @@ def stub_gen(*, release: bool) -> None:
     env = None
     with contextlib.suppress(subprocess.CalledProcessError):
         paths = []
+        lib_paths = []
 
         for instance in json.loads(
             run_command(
@@ -46,11 +47,13 @@ def stub_gen(*, release: bool) -> None:
         ):
             path = pathlib.PurePath(instance["path"])
             paths.append(path.parent)
-            paths.append(path.parent.parent / "lib")
+            lib_paths.append(path.parent.parent / "lib")
 
         env = os.environ.copy()
         paths.append(env["PATH"])
         env["PATH"] = os.pathsep.join(map(str, paths))
+        lib_paths.append(env["LIBRARY_PATH"])
+        env["LIBRARY_PATH"] = os.pathsep.join(map(str, lib_paths))
 
     command = ["cargo", "run", "--bin", "stub_gen"]
 

@@ -19,10 +19,18 @@ use {
             stderr,
         },
         process::ExitCode,
+        sync::Arc,
     },
     ::tokio::{
+        io::{
+            AsyncBufReadExt as _,
+            BufReader,
+            stdin,
+        },
         runtime::Runtime,
         signal::ctrl_c,
+        select,
+        sync::watch,
     },
     ::tracing::{
         debug,
@@ -156,6 +164,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
     };
 
     let close_handle = connection.close_handle().clone();
+    let mute_handle = connection.mute_handle();
 
     runtime.spawn(async move {
         if let Result::Err(error) = ctrl_c().await {
@@ -166,9 +175,42 @@ fn run(command: Command) -> Result<(), BoxedError> {
         close_handle.close();
     });
 
-    println!("Let's talk!");
+    let input_close_handle = connection.close_handle().clone();
+
+    runtime.spawn(async move {
+        let mut reader = BufReader::new(stdin());
+        let mut line = String::new();
+
+        loop {
+            select! {
+                _ = input_close_handle.wait() => break,
+                result = reader.read_line(&mut line) => match result {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if line.trim() == "m" {
+                            mute_handle.toggle();
+
+                            if mute_handle.is_muted() {
+                                println!("\n[ MUTED ]");
+                            } else {
+                                println!("\n[ UNMUTED ]");
+                            }
+                        }
+
+                        line.clear();
+                    }
+                    Err(error) => {
+                        warn!(error = &error as &dyn Error);
+                        break;
+                    },
+                },
+            }
+        }
+    });
+
+    println!("Let's talk! (press 'm' and enter to mute, ctrl+c to exit)");
     runtime.block_on(connection.join())?;
-    println!("Bye.");
+    println!("\nBye.");
     runtime.block_on(instance.close());
     Result::Ok(())
 }
@@ -192,4 +234,29 @@ enum Command {
     Join {
         node_id: NodeId,
     },
+}
+
+pub struct CloseHandle {
+    tx: watch::Sender<bool>,
+    rx: watch::Receiver<bool>,
+}
+
+impl CloseHandle {
+    pub fn new() -> Self {
+        let (tx, rx) = watch::channel(false);
+        Self { tx, rx }
+    }
+
+    pub fn close(&self) {
+        let _ = self.tx.send(true);
+    }
+
+    pub async fn wait(&self) {
+        let mut rx = self.rx.clone();
+        while !*rx.borrow() {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+    }
 }

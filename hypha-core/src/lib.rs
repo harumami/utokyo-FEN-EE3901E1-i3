@@ -22,6 +22,7 @@ use {
         FromSample,
         I24,
         ToSample,
+        Sample,
     },
     ::iroh::{
         KeyParsingError,
@@ -76,7 +77,13 @@ use {
         marker::PhantomData,
         ops::Deref,
         str::FromStr,
-        sync::Arc,
+        sync::{
+            atomic::{
+                AtomicBool,
+                Ordering,
+            },
+            Arc,
+        },
     },
     ::tokio::{
         select,
@@ -85,6 +92,7 @@ use {
             JoinHandle,
             spawn,
         },
+        sync::watch,
     },
     ::tracing::{
         debug,
@@ -230,6 +238,21 @@ impl Instance {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct MuteHandle {
+    inner: Arc<AtomicBool>,
+}
+
+impl MuteHandle {
+    pub fn toggle(&self) {
+        let old = self.inner.fetch_xor(true, Ordering::Relaxed);
+        debug!("toggled mute: {}", !old);
+    }
+    pub fn is_muted(&self) -> bool {
+        self.inner.load(Ordering::Relaxed)
+    }
+}
+
 #[derive(Debug)]
 pub struct Connection<E> {
     rec_ring: Arc<RingBuffer<[f32; 2]>>,
@@ -237,6 +260,7 @@ pub struct Connection<E> {
     close_handle: Arc<CloseHandle>,
     send_handle: JoinHandle<Result<(), E>>,
     recv_handle: JoinHandle<Result<(), E>>,
+    mute_handle: MuteHandle,
 }
 
 impl<E0> Connection<E0> {
@@ -251,6 +275,10 @@ impl<E0> Connection<E0> {
     pub fn close_handle(&self) -> &Arc<CloseHandle> {
         &self.close_handle
     }
+
+    pub fn mute_handle(&self) -> MuteHandle {
+        self.mute_handle.clone()
+    }
 }
 
 impl<E0: Source> Connection<E0> {
@@ -261,10 +289,12 @@ impl<E0: Source> Connection<E0> {
         let rec_ring = Arc::new(RingBuffer::new(Instance::RING_SIZE));
         let play_ring = Arc::new(RingBuffer::new(Instance::RING_SIZE));
         let close_handle = Arc::new(CloseHandle::new());
+        let mute_handle = MuteHandle { inner: Arc::new(AtomicBool::new(false)) };
 
         let send_handle = {
             let rec_ring = rec_ring.clone();
             let close_handle = close_handle.clone();
+            let mute_handle = mute_handle.clone();
 
             spawn(async move {
                 let mut encoder = Encoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS)?;
@@ -281,7 +311,14 @@ impl<E0: Source> Connection<E0> {
                             100. * rec_ring.len() as f32 / rec_ring.capacity() as f32,
                         );
 
-                        encoder.input().extend(rec_ring.drain().flatten());
+                        let samples = rec_ring.drain().flatten().map(|s| {
+                            if mute_handle.is_muted() {
+                                f32::EQUILIBRIUM
+                            } else {
+                                s
+                            }
+                        });
+                        encoder.input().extend(samples);
 
                         while encoder.ready(Instance::FRAME_SIZE) {
                             encoder.encode(Instance::FRAME_SIZE, Instance::MAX_PACKET_SIZE)?;
@@ -359,6 +396,7 @@ impl<E0: Source> Connection<E0> {
             close_handle,
             send_handle,
             recv_handle,
+            mute_handle,
         })
     }
 
@@ -676,22 +714,27 @@ impl<T> RingBuffer<T> {
 
 #[derive(Debug)]
 pub struct CloseHandle {
-    notify: Notify,
+    tx: watch::Sender<bool>,
+    rx: watch::Receiver<bool>,
 }
 
 impl CloseHandle {
     fn new() -> Self {
-        Self {
-            notify: Notify::new(),
-        }
+        let (tx, rx) = watch::channel(false);
+        Self { tx, rx }
     }
 
     pub fn close(&self) {
-        self.notify.notify_waiters();
+        let _ = self.tx.send(true);
     }
 
-    async fn wait(&self) {
-        self.notify.notified().await;
+    pub async fn wait(&self) {
+        let mut rx = self.rx.clone();
+        while !*rx.borrow() {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
     }
 }
 
