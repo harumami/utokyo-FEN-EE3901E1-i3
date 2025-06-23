@@ -141,7 +141,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    const ALPN: &[u8] = b"/eeic-i3/31";
+    const ALPN: &[u8] = b"/harumami/hypha";
     const CHANNELS: u32 = 2;
     const FRAME_SIZE: usize = Self::SAMPLE_RATE as usize * 20 / 1000;
     const MAX_FRAME_SIZE: usize = Self::SAMPLE_RATE as usize * 120 / 1000;
