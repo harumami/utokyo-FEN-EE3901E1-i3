@@ -19,7 +19,6 @@ use {
             stderr,
         },
         process::ExitCode,
-        sync::Arc,
     },
     ::tokio::{
         io::{
@@ -28,12 +27,8 @@ use {
             stdin,
         },
         runtime::Runtime,
-        signal::ctrl_c,
-        select,
-        sync::watch,
     },
     ::tracing::{
-        debug,
         error,
         info,
         instrument,
@@ -163,54 +158,47 @@ fn run(command: Command) -> Result<(), BoxedError> {
         },
     };
 
+    let mute_handle = connection.mute_handle().clone();
     let close_handle = connection.close_handle().clone();
-    let mute_handle = connection.mute_handle();
-
-    runtime.spawn(async move {
-        if let Result::Err(error) = ctrl_c().await {
-            error!(error = &error as &dyn Error);
-        }
-
-        debug!("close stream");
-        close_handle.close();
-    });
-
-    let input_close_handle = connection.close_handle().clone();
 
     runtime.spawn(async move {
         let mut reader = BufReader::new(stdin());
         let mut line = String::new();
 
         loop {
-            select! {
-                _ = input_close_handle.wait() => break,
-                result = reader.read_line(&mut line) => match result {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if line.trim() == "m" {
-                            mute_handle.toggle();
-
-                            if mute_handle.is_muted() {
-                                println!("\n[ MUTED ]");
-                            } else {
-                                println!("\n[ UNMUTED ]");
-                            }
-                        }
-
-                        line.clear();
-                    }
-                    Err(error) => {
-                        warn!(error = &error as &dyn Error);
-                        break;
-                    },
+            match reader.read_line(&mut line).await {
+                Result::Ok(0) => break,
+                Result::Ok(_) => (),
+                Result::Err(error) => {
+                    warn!(error = &error as &dyn Error);
+                    break;
                 },
             }
+
+            match line.trim() {
+                "M" => {
+                    mute_handle.toggle();
+
+                    if mute_handle.is_muted() {
+                        println!("[ MUTED ]");
+                    } else {
+                        println!("[ UNMUTED ]");
+                    }
+                },
+                "Q" => {
+                    close_handle.close();
+                    break;
+                },
+                _ => (),
+            }
+
+            line.clear();
         }
     });
 
-    println!("Let's talk! (press 'm' and enter to mute, ctrl+c to exit)");
+    println!("Let's talk! ('M' to mute, 'Q' to exit)");
     runtime.block_on(connection.join())?;
-    println!("\nBye.");
+    println!("Bye.");
     runtime.block_on(instance.close());
     Result::Ok(())
 }
@@ -234,29 +222,4 @@ enum Command {
     Join {
         node_id: NodeId,
     },
-}
-
-pub struct CloseHandle {
-    tx: watch::Sender<bool>,
-    rx: watch::Receiver<bool>,
-}
-
-impl CloseHandle {
-    pub fn new() -> Self {
-        let (tx, rx) = watch::channel(false);
-        Self { tx, rx }
-    }
-
-    pub fn close(&self) {
-        let _ = self.tx.send(true);
-    }
-
-    pub async fn wait(&self) {
-        let mut rx = self.rx.clone();
-        while !*rx.borrow() {
-            if rx.changed().await.is_err() {
-                break;
-            }
-        }
-    }
 }

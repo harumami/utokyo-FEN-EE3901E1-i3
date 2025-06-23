@@ -2,7 +2,7 @@
 # It is based on the vcpkg port: https://github.com/microsoft/vcpkg/blob/master/ports/speexdsp/CMakeLists.txt
 
 cmake_minimum_required(VERSION 3.20)
-project(NONE)
+project(speex-sys NONE)
 include(FetchContent)
 
 FetchContent_Populate(

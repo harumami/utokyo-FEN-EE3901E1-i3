@@ -22,7 +22,6 @@ use {
         FromSample,
         I24,
         ToSample,
-        Sample,
     },
     ::iroh::{
         KeyParsingError,
@@ -34,17 +33,9 @@ use {
             SendStream,
         },
     },
-    ::opus_sys::{
-        OPUS_APPLICATION_VOIP,
-        OpusDecoder,
-        OpusEncoder,
-        opus_decode_float,
-        opus_decoder_create,
-        opus_decoder_destroy,
-        opus_encode_float,
-        opus_encoder_create,
-        opus_encoder_destroy,
-        opus_strerror,
+    ::opus_rs::{
+        Decoder,
+        Encoder,
     },
     ::rancor::{
         OptionExt as _,
@@ -53,21 +44,9 @@ use {
         fail,
     },
     ::rand::rngs::OsRng,
-    ::speex_sys::{
-        RESAMPLER_ERR_SUCCESS,
-        SpeexResamplerState,
-        speex_resampler_destroy,
-        speex_resampler_init,
-        speex_resampler_process_interleaved_float,
-        speex_resampler_strerror,
-    },
     ::std::{
         cmp::Reverse,
         error::Error,
-        ffi::{
-            CStr,
-            c_int,
-        },
         fmt::{
             Display,
             Formatter,
@@ -78,11 +57,11 @@ use {
         ops::Deref,
         str::FromStr,
         sync::{
+            Arc,
             atomic::{
                 AtomicBool,
                 Ordering,
             },
-            Arc,
         },
     },
     ::tokio::{
@@ -92,7 +71,6 @@ use {
             JoinHandle,
             spawn,
         },
-        sync::watch,
     },
     ::tracing::{
         debug,
@@ -100,6 +78,7 @@ use {
         trace,
         warn,
     },
+    speex_rs::Resampler,
 };
 
 #[derive(Clone, Debug)]
@@ -194,7 +173,7 @@ impl Instance {
             match self.endpoint.accept().await.into_error()?.accept() {
                 Result::Ok(connecting) => break connecting.await.into_error()?,
                 Result::Err(error) => {
-                    debug!("{error}");
+                    debug!(error = &error as &dyn Error);
                     continue;
                 },
             }
@@ -217,7 +196,7 @@ impl Instance {
         &self,
         node_id: NodeId,
     ) -> Result<Connection<E0>, E1> {
-        debug!("connect to {node_id}");
+        debug!(%node_id, "connect to");
 
         let connection = self
             .endpoint
@@ -238,46 +217,31 @@ impl Instance {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct MuteHandle {
-    inner: Arc<AtomicBool>,
-}
-
-impl MuteHandle {
-    pub fn toggle(&self) {
-        let old = self.inner.fetch_xor(true, Ordering::Relaxed);
-        debug!("toggled mute: {}", !old);
-    }
-    pub fn is_muted(&self) -> bool {
-        self.inner.load(Ordering::Relaxed)
-    }
-}
-
 #[derive(Debug)]
 pub struct Connection<E> {
     rec_ring: Arc<RingBuffer<[f32; 2]>>,
     play_ring: Arc<RingBuffer<[f32; 2]>>,
+    mute_handle: Arc<MuteHandle>,
     close_handle: Arc<CloseHandle>,
     send_handle: JoinHandle<Result<(), E>>,
     recv_handle: JoinHandle<Result<(), E>>,
-    mute_handle: MuteHandle,
 }
 
 impl<E0> Connection<E0> {
     pub fn record<E1: Source, E2: Source>(&self) -> Result<AudioStream, E1> {
-        AudioStream::record::<_, E2>(self.rec_ring.clone())
+        AudioStream::record::<_, E2>(self.rec_ring.clone(), self.mute_handle.clone())
     }
 
     pub fn play<E1: Source, E2: Source>(&self) -> Result<AudioStream, E1> {
         AudioStream::play::<_, E2>(self.play_ring.clone())
     }
 
-    pub fn close_handle(&self) -> &Arc<CloseHandle> {
-        &self.close_handle
+    pub fn mute_handle(&self) -> &Arc<MuteHandle> {
+        &self.mute_handle
     }
 
-    pub fn mute_handle(&self) -> MuteHandle {
-        self.mute_handle.clone()
+    pub fn close_handle(&self) -> &Arc<CloseHandle> {
+        &self.close_handle
     }
 }
 
@@ -288,16 +252,17 @@ impl<E0: Source> Connection<E0> {
     ) -> Result<Self, E1> {
         let rec_ring = Arc::new(RingBuffer::new(Instance::RING_SIZE));
         let play_ring = Arc::new(RingBuffer::new(Instance::RING_SIZE));
+        let mute_handle = Arc::new(MuteHandle::new());
         let close_handle = Arc::new(CloseHandle::new());
-        let mute_handle = MuteHandle { inner: Arc::new(AtomicBool::new(false)) };
 
         let send_handle = {
             let rec_ring = rec_ring.clone();
             let close_handle = close_handle.clone();
-            let mute_handle = mute_handle.clone();
 
             spawn(async move {
-                let mut encoder = Encoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS)?;
+                let mut encoder =
+                    Encoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS).into_error()?;
+
                 debug!("start record loop");
 
                 let rec_loop = async {
@@ -305,25 +270,20 @@ impl<E0: Source> Connection<E0> {
                         rec_ring.wait().await;
 
                         debug!(
-                            "input ring: {} of {} used: {}%",
-                            rec_ring.len(),
-                            rec_ring.capacity(),
-                            100. * rec_ring.len() as f32 / rec_ring.capacity() as f32,
+                            len = rec_ring.len(),
+                            cap = rec_ring.capacity(),
+                            per = 100. * rec_ring.len() as f32 / rec_ring.capacity() as f32,
+                            "input ring",
                         );
 
-                        let samples = rec_ring.drain().flatten().map(|s| {
-                            if mute_handle.is_muted() {
-                                f32::EQUILIBRIUM
-                            } else {
-                                s
-                            }
-                        });
-                        encoder.input().extend(samples);
+                        encoder.input().extend(rec_ring.drain().flatten());
 
                         while encoder.ready(Instance::FRAME_SIZE) {
-                            encoder.encode(Instance::FRAME_SIZE, Instance::MAX_PACKET_SIZE)?;
+                            encoder
+                                .encode(Instance::FRAME_SIZE, Instance::MAX_PACKET_SIZE)
+                                .into_error()?;
 
-                            if !encoder.output.is_empty() {
+                            if !encoder.output().is_empty() {
                                 debug!("send opus packet");
                                 let len = (encoder.output().len() as u32).to_le_bytes();
                                 send_stream.write_all(&len).await.into_error()?;
@@ -353,7 +313,9 @@ impl<E0: Source> Connection<E0> {
             let close_handle = close_handle.clone();
 
             spawn(async move {
-                let mut decoder = Decoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS)?;
+                let mut decoder =
+                    Decoder::new(Instance::SAMPLE_RATE, Instance::CHANNELS).into_error()?;
+
                 debug!("start play loop");
 
                 let play_loop = async {
@@ -363,16 +325,16 @@ impl<E0: Source> Connection<E0> {
                         recv_stream.read_exact(&mut len).await.into_error()?;
                         decoder.input().resize(u32::from_le_bytes(len) as _, 0);
                         recv_stream.read_exact(decoder.input()).await.into_error()?;
-                        decoder.decode(Instance::MAX_FRAME_SIZE)?;
+                        decoder.decode(Instance::MAX_FRAME_SIZE).into_error()?;
 
                         play_ring
                             .extend(decoder.output().chunks(2).map(|frame| [frame[0], frame[1]]));
 
                         debug!(
-                            "play ring: {} of {} used: {}%",
-                            play_ring.len(),
-                            play_ring.capacity(),
-                            100. * play_ring.len() as f32 / play_ring.capacity() as f32,
+                            len = play_ring.len(),
+                            cap = play_ring.capacity(),
+                            per = 100. * play_ring.len() as f32 / play_ring.capacity() as f32,
+                            "play ring",
                         );
                     }
 
@@ -404,16 +366,59 @@ impl<E0: Source> Connection<E0> {
         debug!("join send handle");
 
         if let Result::Err(error) = self.send_handle.await.into_error()? {
-            warn!("{error}");
+            warn!(error = &error as &dyn Error);
         }
 
         debug!("join recv handle");
 
         if let Result::Err(error) = self.recv_handle.await.into_error()? {
-            warn!("{error}");
+            warn!(error = &error as &dyn Error);
         }
 
         Result::Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct MuteHandle {
+    muted: AtomicBool,
+}
+
+impl MuteHandle {
+    fn new() -> Self {
+        Self {
+            muted: AtomicBool::new(false),
+        }
+    }
+
+    pub fn toggle(&self) {
+        let old = self.muted.fetch_xor(true, Ordering::AcqRel);
+        debug!(muted = !old, "toggled mute");
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug)]
+pub struct CloseHandle {
+    notify: Notify,
+}
+
+impl CloseHandle {
+    fn new() -> Self {
+        Self {
+            notify: Notify::new(),
+        }
+    }
+
+    pub fn close(&self) {
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        self.notify.notified().await;
     }
 }
 
@@ -424,11 +429,14 @@ pub struct AudioStream {
 }
 
 impl AudioStream {
-    fn record<E0: Source, E1: Source>(ring: Arc<RingBuffer<[f32; 2]>>) -> Result<Self, E0> {
+    fn record<E0: Source, E1: Source>(
+        ring: Arc<RingBuffer<[f32; 2]>>,
+        mute_handle: Arc<MuteHandle>,
+    ) -> Result<Self, E0> {
         let host = default_host();
-        debug!("audio host: {:?}", host.id());
+        debug!(host = host.id().name(), "audio host");
         let device = host.default_input_device().into_error()?;
-        debug!("input audio device: {}", device.name().into_error()?);
+        debug!(device = device.name().into_error()?, "input audio device");
 
         let mut configs = device
             .supported_input_configs()
@@ -437,20 +445,42 @@ impl AudioStream {
 
         configs.sort_by_key(Self::config_sort_key);
         let config = configs.first().into_error()?.with_max_sample_rate();
-        debug!("input audio config: {config:?}");
+        debug!(?config, "input audio config");
 
         let stream = match config.sample_format() {
-            SampleFormat::I8 => Self::build_input::<i8, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I16 => Self::build_input::<i16, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I24 => Self::build_input::<I24, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I32 => Self::build_input::<i32, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I64 => Self::build_input::<i64, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U8 => Self::build_input::<u8, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U16 => Self::build_input::<u16, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U32 => Self::build_input::<u32, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U64 => Self::build_input::<u64, _, E1>(&device, &config.config(), ring),
-            SampleFormat::F32 => Self::build_input::<f32, _, E1>(&device, &config.config(), ring),
-            SampleFormat::F64 => Self::build_input::<f64, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I8 => {
+                Self::build_input::<i8, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::I16 => {
+                Self::build_input::<i16, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::I24 => {
+                Self::build_input::<I24, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::I32 => {
+                Self::build_input::<i32, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::I64 => {
+                Self::build_input::<i64, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::U8 => {
+                Self::build_input::<u8, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::U16 => {
+                Self::build_input::<u16, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::U32 => {
+                Self::build_input::<u32, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::U64 => {
+                Self::build_input::<u64, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::F32 => {
+                Self::build_input::<f32, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
+            SampleFormat::F64 => {
+                Self::build_input::<f64, _, E1>(&device, &config.config(), ring, mute_handle)
+            },
             format => fail!(AnyError(format!("unknown format: {format}").into())),
         }?;
 
@@ -467,6 +497,7 @@ impl AudioStream {
         device: &Device,
         config: &StreamConfig,
         ring: Arc<RingBuffer<[f32; 2]>>,
+        mute_handle: Arc<MuteHandle>,
     ) -> Result<ThreadBound<Stream>, E0> {
         debug!("build input audio stream");
 
@@ -476,27 +507,33 @@ impl AudioStream {
             _ => fail!(AnyError("no input config which is stereo or mono".into())),
         };
 
-        debug!("input is stereo: {stereo}");
-        debug!("input sample rate: {}", config.sample_rate.0);
+        debug!(stereo, "input is stereo or not");
+        debug!(sample_rate = config.sample_rate.0, "input sample rate");
 
         let mut resampler = Resampler::new(
             config.channels as _,
             config.sample_rate.0,
             Instance::SAMPLE_RATE,
             Instance::RESAMPLE_QUALITY,
-        )?;
+        )
+        .into_error()?;
 
         let stream = device
             .build_input_stream::<T, _, _>(
                 config,
                 move |data, _| {
-                    debug!("rec input frames: {}", data.len());
+                    debug!(len = data.len(), "rec input frames");
                     resampler
                         .input()
                         .extend(data.iter().copied().map(T::to_sample));
 
-                    if let Result::Err(error) = resampler.resample::<E1>() {
-                        error!("{error}");
+                    if let Result::Err(error) = resampler.resample() {
+                        error!(error = &error as &dyn Error);
+                        return;
+                    }
+
+                    if mute_handle.is_muted() {
+                        debug!("stream is muted");
                         return;
                     }
 
@@ -516,7 +553,7 @@ impl AudioStream {
 
                     ring.extend(frames);
                 },
-                |error| error!("{error}"),
+                |error| error!(error = &error as &dyn Error),
                 Option::None,
             )
             .into_error()?;
@@ -526,9 +563,9 @@ impl AudioStream {
 
     fn play<E0: Source, E1: Source>(ring: Arc<RingBuffer<[f32; 2]>>) -> Result<Self, E0> {
         let host = default_host();
-        debug!("audio host: {:?}", host.id());
+        debug!(host = host.id().name(), "audio host");
         let device = host.default_output_device().into_error()?;
-        debug!("output audio device: {}", device.name().into_error()?);
+        debug!(device = device.name().into_error()?, "output audio device");
 
         let mut configs = device
             .supported_output_configs()
@@ -537,7 +574,7 @@ impl AudioStream {
 
         configs.sort_by_key(Self::config_sort_key);
         let config = configs.first().into_error()?.with_max_sample_rate();
-        debug!("output audio config: {config:?}");
+        debug!(?config, "output audio config");
 
         let stream = match config.sample_format() {
             SampleFormat::I8 => Self::build_output::<i8, _, E1>(&device, &config.config(), ring),
@@ -577,16 +614,17 @@ impl AudioStream {
             _ => fail!(AnyError("no output config which is stereo or mono".into())),
         };
 
-        debug!("input is stereo: {stereo}");
+        debug!(stereo, "output is stereo or not");
         let sample_rate = config.sample_rate.0;
-        debug!("input sample rate: {sample_rate}");
+        debug!(sample_rate, "output sample rate");
 
         let mut resampler = Resampler::new(
             channels as _,
             Instance::SAMPLE_RATE,
             sample_rate,
             Instance::RESAMPLE_QUALITY,
-        )?;
+        )
+        .into_error()?;
 
         let mut cursor = 0;
 
@@ -594,7 +632,7 @@ impl AudioStream {
             .build_output_stream::<T, _, _>(
                 config,
                 move |data, _| {
-                    debug!("play output frames: {}", data.len());
+                    debug!(len = data.len(), "play output frames");
                     let mut data = data.iter_mut();
 
                     loop {
@@ -631,13 +669,13 @@ impl AudioStream {
 
                         resampler.input().extend(samples);
 
-                        match resampler.resample::<E1>() {
+                        match resampler.resample() {
                             Result::Ok(()) => cursor = 0,
-                            Result::Err(error) => error!("{error}"),
+                            Result::Err(error) => error!(error = &error as &dyn Error),
                         }
                     }
                 },
-                |error| error!("{error}"),
+                |error| error!(error = &error as &dyn Error),
                 Option::None,
             )
             .into_error()?;
@@ -712,32 +750,6 @@ impl<T> RingBuffer<T> {
     }
 }
 
-#[derive(Debug)]
-pub struct CloseHandle {
-    tx: watch::Sender<bool>,
-    rx: watch::Receiver<bool>,
-}
-
-impl CloseHandle {
-    fn new() -> Self {
-        let (tx, rx) = watch::channel(false);
-        Self { tx, rx }
-    }
-
-    pub fn close(&self) {
-        let _ = self.tx.send(true);
-    }
-
-    pub async fn wait(&self) {
-        let mut rx = self.rx.clone();
-        while !*rx.borrow() {
-            if rx.changed().await.is_err() {
-                break;
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash, Debug)]
 struct ThreadBound<T> {
     value: T,
@@ -760,255 +772,6 @@ impl<T> Deref for ThreadBound<T> {
         &self.value
     }
 }
-
-#[derive(Debug)]
-struct Encoder {
-    raw: *mut OpusEncoder,
-    channels: u32,
-    input: Vec<f32>,
-    output: Vec<u8>,
-}
-
-impl Encoder {
-    fn new<E: Source>(sample_rate: u32, channels: u32) -> Result<Self, E> {
-        let mut error = 0;
-
-        let raw = unsafe {
-            opus_encoder_create(
-                sample_rate as _,
-                channels as _,
-                OPUS_APPLICATION_VOIP as _,
-                &mut error,
-            )
-        };
-
-        OpusError::new(error).into_error()?;
-
-        Result::Ok(Self {
-            raw,
-            channels,
-            input: Vec::new(),
-            output: Vec::new(),
-        })
-    }
-
-    fn input(&mut self) -> &mut Vec<f32> {
-        &mut self.input
-    }
-
-    fn output(&self) -> &[u8] {
-        &self.output
-    }
-
-    fn ready(&self, frame_size: usize) -> bool {
-        self.input.len() >= self.channels as usize * frame_size
-    }
-
-    fn encode<E: Source>(&mut self, frame_size: usize, max_packet_size: usize) -> Result<(), E> {
-        self.output.resize(max_packet_size, 0);
-
-        let size = unsafe {
-            opus_encode_float(
-                self.raw,
-                self.input.as_ptr(),
-                frame_size as _,
-                self.output.as_mut_ptr(),
-                self.output.len() as _,
-            )
-        };
-
-        OpusError::new(size).into_error()?;
-        self.input.drain(0..self.channels as usize * frame_size);
-        self.output.truncate(size as _);
-        Result::Ok(())
-    }
-}
-
-impl Drop for Encoder {
-    fn drop(&mut self) {
-        unsafe { opus_encoder_destroy(self.raw) };
-    }
-}
-
-unsafe impl Send for Encoder {}
-
-#[derive(Debug)]
-struct Decoder {
-    raw: *mut OpusDecoder,
-    channels: u32,
-    input: Vec<u8>,
-    output: Vec<f32>,
-}
-
-impl Decoder {
-    fn new<E: Source>(sample_rate: u32, channels: u32) -> Result<Self, E> {
-        let mut error = 0;
-        let raw = unsafe { opus_decoder_create(sample_rate as _, channels as _, &mut error) };
-        OpusError::new(error).into_error()?;
-
-        Result::Ok(Self {
-            raw,
-            channels,
-            input: Vec::new(),
-            output: Vec::new(),
-        })
-    }
-
-    fn input(&mut self) -> &mut Vec<u8> {
-        &mut self.input
-    }
-
-    fn output(&self) -> &[f32] {
-        &self.output
-    }
-
-    fn decode<E: Source>(&mut self, max_frame_size: usize) -> Result<(), E> {
-        self.output.resize(max_frame_size, 0.0);
-
-        let frames = unsafe {
-            opus_decode_float(
-                self.raw,
-                self.input.as_ptr(),
-                self.input.len() as _,
-                self.output.as_mut_ptr(),
-                max_frame_size as _,
-                0,
-            )
-        };
-
-        OpusError::new(frames).into_error()?;
-
-        self.output
-            .truncate(self.channels as usize * frames as usize);
-
-        Result::Ok(())
-    }
-}
-
-impl Drop for Decoder {
-    fn drop(&mut self) {
-        unsafe { opus_decoder_destroy(self.raw) };
-    }
-}
-
-unsafe impl Send for Decoder {}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-struct OpusError(c_int);
-
-impl OpusError {
-    fn new(error: c_int) -> Result<(), Self> {
-        match error {
-            0.. => Result::Ok(()),
-            ..0 => Result::Err(Self(error)),
-        }
-    }
-}
-
-impl Display for OpusError {
-    fn fmt(&self, f: &mut Formatter) -> FmtResult {
-        match unsafe { CStr::from_ptr(opus_strerror(self.0)) }.to_str() {
-            Result::Ok(error) => write!(f, "opus: {}", error),
-            Result::Err(error) => write!(f, "opus: {}", error),
-        }
-    }
-}
-
-impl Error for OpusError {}
-
-#[derive(Debug)]
-struct Resampler {
-    raw: *mut SpeexResamplerState,
-    channels: u32,
-    in_rate: u32,
-    out_rate: u32,
-    input: Vec<f32>,
-    output: Vec<f32>,
-}
-
-impl Resampler {
-    fn new<E: Source>(channels: u32, in_rate: u32, out_rate: u32, quality: u32) -> Result<Self, E> {
-        let mut error = 0;
-
-        let raw =
-            unsafe { speex_resampler_init(channels, in_rate, out_rate, quality as _, &mut error) };
-
-        SpeexError::new(error).into_error()?;
-
-        Result::Ok(Self {
-            raw,
-            channels,
-            in_rate,
-            out_rate,
-            input: Vec::new(),
-            output: Vec::new(),
-        })
-    }
-
-    fn input(&mut self) -> &mut Vec<f32> {
-        &mut self.input
-    }
-
-    fn output(&self) -> &[f32] {
-        &self.output
-    }
-
-    fn resample<E: Source>(&mut self) -> Result<(), E> {
-        self.output.resize(
-            self.input.len() * self.out_rate as usize / self.in_rate as usize + 1,
-            0.0,
-        );
-
-        let mut in_len = self.input.len() as u32 / self.channels;
-        let mut out_len = self.output.len() as u32 / self.channels;
-
-        let error = unsafe {
-            speex_resampler_process_interleaved_float(
-                self.raw,
-                self.input.as_ptr(),
-                &mut in_len,
-                self.output.as_mut_ptr(),
-                &mut out_len,
-            )
-        };
-
-        SpeexError::new(error).into_error()?;
-        self.input.drain(..(self.channels * in_len) as usize);
-        self.output.truncate((self.channels * out_len) as _);
-        Result::Ok(())
-    }
-}
-
-impl Drop for Resampler {
-    fn drop(&mut self) {
-        unsafe { speex_resampler_destroy(self.raw) };
-    }
-}
-
-unsafe impl Send for Resampler {}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-struct SpeexError(c_int);
-
-impl SpeexError {
-    fn new(error: c_int) -> Result<(), Self> {
-        match error == RESAMPLER_ERR_SUCCESS as _ {
-            true => Result::Ok(()),
-            false => Result::Err(Self(error)),
-        }
-    }
-}
-
-impl Display for SpeexError {
-    fn fmt(&self, f: &mut Formatter) -> FmtResult {
-        match unsafe { CStr::from_ptr(speex_resampler_strerror(self.0)) }.to_str() {
-            Result::Ok(error) => write!(f, "speex: {}", error),
-            Result::Err(error) => write!(f, "speex: {}", error),
-        }
-    }
-}
-
-impl Error for SpeexError {}
 
 #[derive(Debug)]
 struct AnyError(Box<dyn Error + Send + Sync + 'static>);

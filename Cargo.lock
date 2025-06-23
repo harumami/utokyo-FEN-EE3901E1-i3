@@ -1570,10 +1570,10 @@ dependencies = [
  "crossbeam",
  "dasp",
  "iroh",
- "opus-sys",
+ "opus-rs",
  "rancor",
  "rand 0.8.5",
- "speex-sys",
+ "speex-rs",
  "tokio",
  "tracing",
 ]
@@ -2716,6 +2716,13 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
+
+[[package]]
+name = "opus-rs"
+version = "0.0.0"
+dependencies = [
+ "opus-sys",
+]
 
 [[package]]
 name = "opus-sys"
@@ -3866,6 +3873,13 @@ checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
 dependencies = [
  "libc",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "speex-rs"
+version = "0.0.0"
+dependencies = [
+ "speex-sys",
 ]
 
 [[package]]

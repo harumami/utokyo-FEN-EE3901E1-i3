@@ -1,5 +1,5 @@
 [workspace]
-members = ["hypha-cli", "hypha-core", "hypha-py", "hypha-ring", "opus-sys", "speex-sys"]
+members = ["hypha-cli", "hypha-core", "hypha-py", "hypha-ring", "opus-rs", "opus-sys", "speex-rs", "speex-sys"]
 resolver = "3"
 
 [workspace.package]
@@ -23,6 +23,8 @@ tokio = "1.45.1"
 tracing = "0.1.41"
 tracing-appender = "0.2.3"
 tracing-subscriber = "0.3.19"
-hypha-core = { path = "hypha-core" }
-opus-sys = { path = "opus-sys" }
-speex-sys = { path = "speex-sys" }
+hypha-core.path = "hypha-core"
+opus-rs.path = "opus-rs"
+opus-sys.path = "opus-sys"
+speex-rs.path = "speex-rs"
+speex-sys.path = "speex-sys"
