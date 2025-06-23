@@ -1,4 +1,7 @@
 target
+build
+.cache
 **/__pycache__
 uv.lock
+compile_commands.json
 **/*.pyi

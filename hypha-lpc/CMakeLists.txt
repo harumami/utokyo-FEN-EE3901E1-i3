@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
+set(CMAKE_REQUIRED_LIBRARIES m)
 project(hypha-lpc CXX)
 
 add_library(
