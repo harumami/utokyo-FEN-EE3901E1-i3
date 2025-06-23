@@ -15,8 +15,6 @@ Checks:
   - -readability-function-cognitive-complexity
   - -readability-identifier-length
   - -readability-magic-numbers
-ExtraArgsBefore:
-  - -Weverything
 FormatStyle: file
 HeaderFileExtensions:
   - h
