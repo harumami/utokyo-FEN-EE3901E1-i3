@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import pathlib
@@ -34,41 +35,42 @@ def build_editable(
 
 
 def stub_gen(*, release: bool) -> None:
-    path = pathlib.Path(
-        json.loads(
+    env = None
+    with contextlib.suppress(subprocess.CalledProcessError):
+        paths = []
+
+        for instance in json.loads(
             run_command(
                 ["uv", "python", "list", "--only-installed", "--output-format", "json"]
             )
-        )[0]["path"]
-    ).parent
+        ):
+            path = pathlib.PurePath(instance["path"])
+            paths.append(path.parent)
+            paths.append(path.parent / "lib")
+
+        env = os.environ.copy()
+        paths.append(env["PATH"])
+        env["PATH"] = os.pathsep.join(map(str, paths))
 
     command = ["cargo", "run", "--bin", "stub_gen"]
 
     if release:
         command.append("--release")
 
-    run_command(command, path=path)
+    run_command(command, env=env)
 
 
-def run_command(command: list[str], path: str | None = None) -> bytes:
-    env = os.environ.copy()
-
-    if path is not None:
-        env["PATH"] = f"{path}{os.pathsep}{env['PATH']}"
-
+def run_command(
+    command: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    check: bool=True
+) -> bytes:
     print(f"Running `{' '.join(command)}`")
     sys.stdout.flush()
-    result = subprocess.run(command, stdout=subprocess.PIPE, env=env, check=False)  # noqa: S603
+    result = subprocess.run(command, stdout=subprocess.PIPE, env=env, check=check)  # noqa: S603
     sys.stdout.buffer.write(result.stdout)
     sys.stdout.flush()
-
-    if result.returncode != 0:
-        sys.stderr.write(
-            f"Error: command `{' '.join(command)}` returned non-zero exit status {result.returncode}\n"  # noqa: E501
-        )
-
-        sys.exit(1)
-
     return result.stdout
 
 
