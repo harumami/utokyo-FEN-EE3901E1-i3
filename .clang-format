@@ -1,0 +1,5 @@
+AlignAfterOpenBracket: BlockIndent
+AllowShortFunctionsOnASingleLine: Empty
+BreakBeforeBinaryOperators: All
+IndentCaseLabels: true
+IndentWidth: 4
