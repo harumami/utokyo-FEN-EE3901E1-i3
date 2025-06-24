@@ -4,10 +4,10 @@ use {
         Subcommand,
     },
     ::hypha_core::{
+        Address,
         Instance,
         Secret,
     },
-    ::iroh::NodeId,
     ::rancor::{
         BoxedError,
         ResultExt as _,
@@ -128,13 +128,13 @@ fn run(command: Command) -> Result<(), BoxedError> {
             (runtime, instance, connection)
         },
         Command::Join {
-            node_id,
+            address,
         } => {
             let runtime = Runtime::new().into_error()?;
 
             let (instance, connection) = runtime.block_on(async {
                 let instance = Instance::bind(Option::None).await?;
-                let connection = instance.connect::<BoxedError, _>(node_id).await?;
+                let connection = instance.connect::<BoxedError, _>(address).await?;
                 Result::Ok((instance, connection))
             })?;
 
@@ -142,7 +142,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
         },
     };
 
-    let _recorder = match connection.record::<BoxedError, BoxedError>() {
+    let _recorder = match connection.record::<BoxedError>() {
         Result::Ok(recorder) => Option::Some(recorder),
         Result::Err(error) => {
             info!(error = &error as &dyn Error);
@@ -150,7 +150,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
         },
     };
 
-    let _player = match connection.play::<BoxedError, BoxedError>() {
+    let _player = match connection.play::<BoxedError>() {
         Result::Ok(player) => Option::Some(player),
         Result::Err(error) => {
             info!(error = &error as &dyn Error);
@@ -220,6 +220,6 @@ enum Command {
         secret: Option<Secret>,
     },
     Join {
-        node_id: NodeId,
+        address: Address,
     },
 }

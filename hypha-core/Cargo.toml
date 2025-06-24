@@ -7,7 +7,7 @@ edition.workspace = true
 cpal.workspace = true
 crossbeam.workspace = true
 dasp = { workspace = true, features = ["signal"] }
-iroh.workspace = true
+iroh = { workspace = true, features = ["discovery-local-network"] }
 rancor.workspace = true
 rand.workspace = true
 tokio.workspace = true
