@@ -21,7 +21,7 @@ def build_wheel(
     config_settings: dict[str, object] | None = None,
     metadata_directory: str | None = None,
 ) -> str:
-    # stub_gen(release=True)
+    stub_gen(release=True)
     return maturin.build_wheel(wheel_directory, config_settings, metadata_directory)
 
 
@@ -30,7 +30,7 @@ def build_editable(
     config_settings: dict[str, object] | None = None,
     metadata_directory: str | None = None,
 ) -> str:
-    # stub_gen(release=False)
+    stub_gen(release=False)
     return maturin.build_editable(wheel_directory, config_settings, metadata_directory)
 
 
