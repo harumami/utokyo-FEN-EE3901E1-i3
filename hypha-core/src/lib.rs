@@ -38,12 +38,14 @@ use {
         Encoder,
     },
     ::rancor::{
+        BoxedError,
         OptionExt as _,
         ResultExt as _,
         Source,
         fail,
     },
     ::rand::rngs::OsRng,
+    ::speex_rs::Resampler,
     ::std::{
         cmp::Reverse,
         error::Error,
@@ -54,6 +56,7 @@ use {
         },
         iter::from_fn,
         marker::PhantomData,
+        net::SocketAddr,
         ops::Deref,
         str::FromStr,
         sync::{
@@ -63,6 +66,7 @@ use {
                 Ordering,
             },
         },
+        time::Duration,
     },
     ::tokio::{
         select,
@@ -71,6 +75,7 @@ use {
             JoinHandle,
             spawn,
         },
+        time::sleep,
     },
     ::tracing::{
         debug,
@@ -78,7 +83,6 @@ use {
         trace,
         warn,
     },
-    speex_rs::Resampler,
 };
 
 #[derive(Clone, Debug)]
@@ -152,6 +156,7 @@ impl Instance {
             .secret_key(secret.key().clone())
             .alpns(vec![Self::ALPN.to_vec()])
             .discovery_n0()
+            .discovery_local_network()
             .bind()
             .await
             .map_err(|error| AnyError(error.into_boxed_dyn_error()))
@@ -194,9 +199,35 @@ impl Instance {
 
     pub async fn connect<E0: Source, E1: Source>(
         &self,
-        node_id: NodeId,
+        address: Address,
     ) -> Result<Connection<E0>, E1> {
-        debug!(%node_id, "connect to");
+        debug!(%address, "connect to");
+
+        let node_id = match address {
+            Address::Id(id) => id,
+            Address::Direct(direct) => 'label: {
+                debug!(%direct, "search remote direct");
+
+                for _ in 0..10 {
+                    for remote in self.endpoint.remote_info_iter() {
+                        let id = remote.node_id;
+                        debug!(%id, "find remote");
+
+                        for addr in &remote.addrs {
+                            debug!(remote_addr = %addr.addr, "find remote address");
+
+                            if addr.addr == direct {
+                                break 'label id;
+                            }
+                        }
+                    }
+
+                    sleep(Duration::from_secs(1)).await;
+                }
+
+                fail!(AnyError("unknown address".into()));
+            },
+        };
 
         let connection = self
             .endpoint
@@ -217,6 +248,38 @@ impl Instance {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Address {
+    Id(NodeId),
+    Direct(SocketAddr),
+}
+
+impl Display for Address {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Id(id) => id.fmt(f),
+            Self::Direct(direct) => direct.fmt(f),
+        }
+    }
+}
+
+impl FromStr for Address {
+    type Err = BoxedError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match FromStr::from_str(s) {
+            Result::Ok(id) => Result::Ok(Self::Id(id)),
+            Result::Err(error0) => match FromStr::from_str(s) {
+                Result::Ok(direct) => Result::Ok(Self::Direct(direct)),
+                Result::Err(error1) => Result::Err(AnyError("invalid address".into()))
+                    .into_error()
+                    .trace(error0)
+                    .trace(error1),
+            },
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Connection<E> {
     rec_ring: Arc<RingBuffer<[f32; 2]>>,
@@ -228,12 +291,12 @@ pub struct Connection<E> {
 }
 
 impl<E0> Connection<E0> {
-    pub fn record<E1: Source, E2: Source>(&self) -> Result<AudioStream, E1> {
-        AudioStream::record::<_, E2>(self.rec_ring.clone(), self.mute_handle.clone())
+    pub fn record<E1: Source>(&self) -> Result<AudioStream, E1> {
+        AudioStream::record::<_>(self.rec_ring.clone(), self.mute_handle.clone())
     }
 
-    pub fn play<E1: Source, E2: Source>(&self) -> Result<AudioStream, E1> {
-        AudioStream::play::<_, E2>(self.play_ring.clone())
+    pub fn play<E1: Source>(&self) -> Result<AudioStream, E1> {
+        AudioStream::play::<_>(self.play_ring.clone())
     }
 
     pub fn mute_handle(&self) -> &Arc<MuteHandle> {
@@ -429,7 +492,7 @@ pub struct AudioStream {
 }
 
 impl AudioStream {
-    fn record<E0: Source, E1: Source>(
+    fn record<E0: Source>(
         ring: Arc<RingBuffer<[f32; 2]>>,
         mute_handle: Arc<MuteHandle>,
     ) -> Result<Self, E0> {
@@ -449,37 +512,37 @@ impl AudioStream {
 
         let stream = match config.sample_format() {
             SampleFormat::I8 => {
-                Self::build_input::<i8, _, E1>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<i8, _>(&device, &config.config(), ring, mute_handle)
             },
             SampleFormat::I16 => {
-                Self::build_input::<i16, _, E1>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<i16, _>(&device, &config.config(), ring, mute_handle)
             },
             SampleFormat::I24 => {
-                Self::build_input::<I24, _, E1>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<I24, _>(&device, &config.config(), ring, mute_handle)
             },
             SampleFormat::I32 => {
-                Self::build_input::<i32, _, E1>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<i32, _>(&device, &config.config(), ring, mute_handle)
             },
             SampleFormat::I64 => {
-                Self::build_input::<i64, _, E1>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<i64, _>(&device, &config.config(), ring, mute_handle)
             },
             SampleFormat::U8 => {
-                Self::build_input::<u8, _, E1>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<u8, _>(&device, &config.config(), ring, mute_handle)
             },
             SampleFormat::U16 => {
-                Self::build_input::<u16, _, E1>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<u16, _>(&device, &config.config(), ring, mute_handle)
             },
             SampleFormat::U32 => {
-                Self::build_input::<u32, _, E1>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<u32, _>(&device, &config.config(), ring, mute_handle)
             },
             SampleFormat::U64 => {
-                Self::build_input::<u64, _, E1>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<u64, _>(&device, &config.config(), ring, mute_handle)
             },
             SampleFormat::F32 => {
-                Self::build_input::<f32, _, E1>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<f32, _>(&device, &config.config(), ring, mute_handle)
             },
             SampleFormat::F64 => {
-                Self::build_input::<f64, _, E1>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<f64, _>(&device, &config.config(), ring, mute_handle)
             },
             format => fail!(AnyError(format!("unknown format: {format}").into())),
         }?;
@@ -493,7 +556,7 @@ impl AudioStream {
         })
     }
 
-    fn build_input<T: SizedSample + ToSample<f32>, E0: Source, E1: Source>(
+    fn build_input<T: SizedSample + ToSample<f32>, E0: Source>(
         device: &Device,
         config: &StreamConfig,
         ring: Arc<RingBuffer<[f32; 2]>>,
@@ -561,7 +624,7 @@ impl AudioStream {
         Result::Ok(ThreadBound::new(stream))
     }
 
-    fn play<E0: Source, E1: Source>(ring: Arc<RingBuffer<[f32; 2]>>) -> Result<Self, E0> {
+    fn play<E0: Source>(ring: Arc<RingBuffer<[f32; 2]>>) -> Result<Self, E0> {
         let host = default_host();
         debug!(host = host.id().name(), "audio host");
         let device = host.default_output_device().into_error()?;
@@ -577,17 +640,17 @@ impl AudioStream {
         debug!(?config, "output audio config");
 
         let stream = match config.sample_format() {
-            SampleFormat::I8 => Self::build_output::<i8, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I16 => Self::build_output::<i16, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I24 => Self::build_output::<I24, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I32 => Self::build_output::<i32, _, E1>(&device, &config.config(), ring),
-            SampleFormat::I64 => Self::build_output::<i64, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U8 => Self::build_output::<u8, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U16 => Self::build_output::<u16, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U32 => Self::build_output::<u32, _, E1>(&device, &config.config(), ring),
-            SampleFormat::U64 => Self::build_output::<u64, _, E1>(&device, &config.config(), ring),
-            SampleFormat::F32 => Self::build_output::<f32, _, E1>(&device, &config.config(), ring),
-            SampleFormat::F64 => Self::build_output::<f64, _, E1>(&device, &config.config(), ring),
+            SampleFormat::I8 => Self::build_output::<i8, _>(&device, &config.config(), ring),
+            SampleFormat::I16 => Self::build_output::<i16, _>(&device, &config.config(), ring),
+            SampleFormat::I24 => Self::build_output::<I24, _>(&device, &config.config(), ring),
+            SampleFormat::I32 => Self::build_output::<i32, _>(&device, &config.config(), ring),
+            SampleFormat::I64 => Self::build_output::<i64, _>(&device, &config.config(), ring),
+            SampleFormat::U8 => Self::build_output::<u8, _>(&device, &config.config(), ring),
+            SampleFormat::U16 => Self::build_output::<u16, _>(&device, &config.config(), ring),
+            SampleFormat::U32 => Self::build_output::<u32, _>(&device, &config.config(), ring),
+            SampleFormat::U64 => Self::build_output::<u64, _>(&device, &config.config(), ring),
+            SampleFormat::F32 => Self::build_output::<f32, _>(&device, &config.config(), ring),
+            SampleFormat::F64 => Self::build_output::<f64, _>(&device, &config.config(), ring),
             format => fail!(AnyError(format!("unknown format: {format}").into())),
         }?;
 
@@ -600,7 +663,7 @@ impl AudioStream {
         })
     }
 
-    fn build_output<T: SizedSample + FromSample<f32>, E0: Source, E1: Source>(
+    fn build_output<T: SizedSample + FromSample<f32>, E0: Source>(
         device: &Device,
         config: &StreamConfig,
         ring: Arc<RingBuffer<[f32; 2]>>,

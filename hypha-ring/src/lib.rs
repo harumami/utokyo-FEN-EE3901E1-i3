@@ -25,10 +25,60 @@ impl<T> Ring<T> {
             inner: Arc::new(Inner::new(capacity)),
         }
     }
+
+    pub fn producer(&self) -> Option<Producer<T>> {
+        Producer::new(self)
+    }
+
+    pub fn consumer(&self) -> Option<Consumer<T>> {
+        Consumer::new(self)
+    }
 }
 
 pub struct Producer<T> {
     inner: Arc<Inner<T>>,
+}
+
+impl<T> Producer<T> {
+    pub fn new(ring: &Ring<T>) -> Option<Self> {
+        let inner = &ring.inner;
+
+        match inner.producer.fetch_or(true, Ordering::AcqRel) {
+            false => Option::Some(Self {
+                inner: inner.clone(),
+            }),
+            true => Option::None,
+        }
+    }
+}
+
+impl<T> Drop for Producer<T> {
+    fn drop(&mut self) {
+        self.inner.producer.store(false, Ordering::Release);
+    }
+}
+
+pub struct Consumer<T> {
+    inner: Arc<Inner<T>>,
+}
+
+impl<T> Consumer<T> {
+    pub fn new(ring: &Ring<T>) -> Option<Self> {
+        let inner = &ring.inner;
+
+        match inner.consumer.fetch_or(true, Ordering::AcqRel) {
+            false => Option::Some(Self {
+                inner: inner.clone(),
+            }),
+            true => Option::None,
+        }
+    }
+}
+
+impl<T> Drop for Consumer<T> {
+    fn drop(&mut self) {
+        self.inner.consumer.store(false, Ordering::Release);
+    }
 }
 
 struct Inner<T> {
@@ -51,6 +101,8 @@ impl<T> Inner<T> {
             values: UnsafeCell::new(Box::new_uninit_slice(capacity)),
         }
     }
+
+    unsafe fn push(&self, values: &[T]) {}
 }
 
 impl<T> Drop for Inner<T> {
@@ -60,7 +112,7 @@ impl<T> Drop for Inner<T> {
         let values = self.values.get_mut();
 
         for i in head..tail {
-            unsafe { values[i].assume_init_drop() };
+            unsafe { values[i % values.len()].assume_init_drop() };
         }
     }
 }

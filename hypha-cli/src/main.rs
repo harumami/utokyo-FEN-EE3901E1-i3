@@ -4,10 +4,10 @@ use {
         Subcommand,
     },
     ::hypha_core::{
+        Address,
         Instance,
         Secret,
     },
-    ::iroh::NodeId,
     ::rancor::{
         BoxedError,
         ResultExt as _,
@@ -46,6 +46,7 @@ use {
         registry::Registry,
         util::SubscriberInitExt as _,
     },
+    tracing::debug,
 };
 
 fn main() -> ExitCode {
@@ -101,48 +102,67 @@ fn init() -> Result<Result<(Command, WorkerGuard), ExitCode>, BoxedError> {
 
 #[instrument(skip(command))]
 fn run(command: Command) -> Result<(), BoxedError> {
-    let (runtime, instance, connection) = match command {
+    let (secret, method) = match command {
         Command::Generate => {
             let secret = Secret::generate();
             println!("Your SECRET: {secret}");
-            println!("Your Node ID: {}", secret.node_id());
+            println!("Your ID: {}", secret.node_id());
             return Result::Ok(());
         },
         Command::Host {
             secret,
-        } => {
-            let runtime = Runtime::new().into_error()?;
-
-            let (instance, connection) = runtime.block_on(async {
-                let instance = Instance::bind(secret).await?;
-
-                println!(
-                    "Your Node ID: {}",
-                    instance.endpoint().secret_key().public()
-                );
-
-                let connection = instance.accept::<BoxedError, _>().await?;
-                Result::Ok((instance, connection))
-            })?;
-
-            (runtime, instance, connection)
-        },
+        } => (secret, Method::Host),
         Command::Join {
-            node_id,
-        } => {
-            let runtime = Runtime::new().into_error()?;
-
-            let (instance, connection) = runtime.block_on(async {
-                let instance = Instance::bind(Option::None).await?;
-                let connection = instance.connect::<BoxedError, _>(node_id).await?;
-                Result::Ok((instance, connection))
-            })?;
-
-            (runtime, instance, connection)
-        },
+            address,
+        } => (Option::None, Method::Join(address)),
     };
 
-    let _recorder = match connection.record::<BoxedError, BoxedError>() {
+    let runtime = Runtime::new().into_error()?;
+    let instance = runtime.block_on(Instance::bind(secret))?;
+    println!("Your ID: {}", instance.endpoint().secret_key().public());
+    let mut directs_watch = instance.endpoint().direct_addresses();
+
+    runtime.spawn(async move {
+        debug!("search directs");
+
+        let directs = match directs_watch.get() {
+            Result::Ok(directs) => match directs {
+                Option::Some(directs) => directs,
+                Option::None => loop {
+                    match directs_watch.updated().await {
+                        Result::Ok(directs) => match directs {
+                            Option::Some(directs) => break directs,
+                            Option::None => {
+                                debug!("directs are not found");
+                                continue;
+                            },
+                        },
+                        Result::Err(error) => {
+                            error!(error = &error as &dyn Error);
+                            return;
+                        },
+                    }
+                },
+            },
+            Result::Err(error) => {
+                error!(error = &error as &dyn Error);
+                return;
+            },
+        };
+
+        for direct in directs {
+            println!("Your Direct: {}", direct.addr);
+        }
+    });
+
+    let connection = runtime.block_on(async {
+        match method {
+            Method::Host => instance.accept::<BoxedError, _>().await,
+            Method::Join(address) => instance.connect::<BoxedError, _>(address).await,
+        }
+    })?;
+
+    let _recorder = match connection.record::<BoxedError>() {
         Result::Ok(recorder) => Option::Some(recorder),
         Result::Err(error) => {
             info!(error = &error as &dyn Error);
@@ -150,7 +170,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
         },
     };
 
-    let _player = match connection.play::<BoxedError, BoxedError>() {
+    let _player = match connection.play::<BoxedError>() {
         Result::Ok(player) => Option::Some(player),
         Result::Err(error) => {
             info!(error = &error as &dyn Error);
@@ -220,6 +240,11 @@ enum Command {
         secret: Option<Secret>,
     },
     Join {
-        node_id: NodeId,
+        address: Address,
     },
+}
+
+enum Method {
+    Host,
+    Join(Address),
 }
