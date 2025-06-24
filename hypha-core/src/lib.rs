@@ -204,10 +204,15 @@ impl Instance {
         let node_id = match address {
             Address::Id(id) => id,
             Address::Direct(direct) => 'label: {
+                debug!(%direct, "search remote direct");
+
                 for remote in self.endpoint.remote_info_iter() {
                     let id = remote.node_id;
+                    debug!(%id, "find remote");
 
                     for addr in &remote.addrs {
+                        debug!(remote_addr = %addr.addr, "find remote address");
+
                         if addr.addr == direct {
                             break 'label id;
                         }

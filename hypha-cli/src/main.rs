@@ -106,7 +106,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
         Command::Generate => {
             let secret = Secret::generate();
             println!("Your SECRET: {secret}");
-            println!("Your Node ID: {}", secret.node_id());
+            println!("Your ID: {}", secret.node_id());
             return Result::Ok(());
         },
         Command::Host {
@@ -116,6 +116,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
             address,
         } => (Option::None, Method::Join(address)),
     };
+
     let runtime = Runtime::new().into_error()?;
     let instance = runtime.block_on(Instance::bind(secret))?;
     println!("Your ID: {}", instance.endpoint().secret_key().public());
