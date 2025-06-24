@@ -66,6 +66,7 @@ use {
                 Ordering,
             },
         },
+        time::Duration,
     },
     ::tokio::{
         select,
@@ -74,6 +75,7 @@ use {
             JoinHandle,
             spawn,
         },
+        time::sleep,
     },
     ::tracing::{
         debug,
@@ -206,17 +208,21 @@ impl Instance {
             Address::Direct(direct) => 'label: {
                 debug!(%direct, "search remote direct");
 
-                for remote in self.endpoint.remote_info_iter() {
-                    let id = remote.node_id;
-                    debug!(%id, "find remote");
+                for _ in 0..10 {
+                    for remote in self.endpoint.remote_info_iter() {
+                        let id = remote.node_id;
+                        debug!(%id, "find remote");
 
-                    for addr in &remote.addrs {
-                        debug!(remote_addr = %addr.addr, "find remote address");
+                        for addr in &remote.addrs {
+                            debug!(remote_addr = %addr.addr, "find remote address");
 
-                        if addr.addr == direct {
-                            break 'label id;
+                            if addr.addr == direct {
+                                break 'label id;
+                            }
                         }
                     }
+
+                    sleep(Duration::from_secs(1)).await;
                 }
 
                 fail!(AnyError("unknown address".into()));
