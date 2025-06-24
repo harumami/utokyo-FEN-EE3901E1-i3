@@ -142,6 +142,27 @@ fn run(command: Command) -> Result<(), BoxedError> {
         },
     };
 
+    let mut directs = instance.endpoint().direct_addresses();
+
+    runtime.spawn(async move {
+        loop {
+            let directs = match directs.updated().await {
+                Result::Ok(directs) => match directs {
+                    Option::Some(directs) => directs,
+                    Option::None => continue,
+                },
+                Result::Err(error) => {
+                    error!(error = &error as &dyn Error);
+                    break;
+                },
+            };
+
+            for direct in directs {
+                println!("Your Direct: {}", direct.addr);
+            }
+        }
+    });
+
     let _recorder = match connection.record::<BoxedError>() {
         Result::Ok(recorder) => Option::Some(recorder),
         Result::Err(error) => {
