@@ -102,7 +102,7 @@ fn init() -> Result<Result<(Command, WorkerGuard), ExitCode>, BoxedError> {
 
 #[instrument(skip(command))]
 fn run(command: Command) -> Result<(), BoxedError> {
-    let (runtime, instance, connection) = match command {
+    let (secret, method) = match command {
         Command::Generate => {
             let secret = Secret::generate();
             println!("Your SECRET: {secret}");
@@ -111,41 +111,19 @@ fn run(command: Command) -> Result<(), BoxedError> {
         },
         Command::Host {
             secret,
-        } => {
-            let runtime = Runtime::new().into_error()?;
-
-            let (instance, connection) = runtime.block_on(async {
-                let instance = Instance::bind(secret).await?;
-
-                println!(
-                    "Your Node ID: {}",
-                    instance.endpoint().secret_key().public()
-                );
-
-                let connection = instance.accept::<BoxedError, _>().await?;
-                Result::Ok((instance, connection))
-            })?;
-
-            (runtime, instance, connection)
-        },
+        } => (secret, Method::Host),
         Command::Join {
             address,
-        } => {
-            let runtime = Runtime::new().into_error()?;
-
-            let (instance, connection) = runtime.block_on(async {
-                let instance = Instance::bind(Option::None).await?;
-                let connection = instance.connect::<BoxedError, _>(address).await?;
-                Result::Ok((instance, connection))
-            })?;
-
-            (runtime, instance, connection)
-        },
+        } => (Option::None, Method::Join(address)),
     };
-
+    let runtime = Runtime::new().into_error()?;
+    let instance = runtime.block_on(Instance::bind(secret))?;
+    println!("Your ID: {}", instance.endpoint().secret_key().public());
     let mut directs_watch = instance.endpoint().direct_addresses();
 
     runtime.spawn(async move {
+        debug!("search directs");
+
         let directs = match directs_watch.get() {
             Result::Ok(directs) => match directs {
                 Option::Some(directs) => directs,
@@ -175,6 +153,13 @@ fn run(command: Command) -> Result<(), BoxedError> {
             println!("Your Direct: {}", direct.addr);
         }
     });
+
+    let connection = runtime.block_on(async {
+        match method {
+            Method::Host => instance.accept::<BoxedError, _>().await,
+            Method::Join(address) => instance.connect::<BoxedError, _>(address).await,
+        }
+    })?;
 
     let _recorder = match connection.record::<BoxedError>() {
         Result::Ok(recorder) => Option::Some(recorder),
@@ -256,4 +241,9 @@ enum Command {
     Join {
         address: Address,
     },
+}
+
+enum Method {
+    Host,
+    Join(Address),
 }
