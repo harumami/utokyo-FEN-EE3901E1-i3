@@ -1569,6 +1569,7 @@ dependencies = [
  "cpal",
  "crossbeam",
  "dasp",
+ "hypha-lpc-rs",
  "iroh",
  "opus-rs",
  "rancor",
@@ -1576,6 +1577,21 @@ dependencies = [
  "speex-rs",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "hypha-lpc-rs"
+version = "0.0.0"
+dependencies = [
+ "hypha-lpc-sys",
+]
+
+[[package]]
+name = "hypha-lpc-sys"
+version = "0.0.0"
+dependencies = [
+ "bindgen",
+ "cmake",
 ]
 
 [[package]]
