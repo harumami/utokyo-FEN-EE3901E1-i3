@@ -1569,7 +1569,6 @@ dependencies = [
  "cpal",
  "crossbeam",
  "dasp",
- "hypha-lpc-rs",
  "iroh",
  "opus-rs",
  "rancor",

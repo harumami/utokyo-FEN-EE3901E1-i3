@@ -44,6 +44,7 @@ use {
         fail,
     },
     ::rand::rngs::OsRng,
+    ::speex_rs::Resampler,
     ::std::{
         cmp::Reverse,
         error::Error,
@@ -78,7 +79,6 @@ use {
         trace,
         warn,
     },
-    speex_rs::Resampler,
 };
 
 #[derive(Clone, Debug)]
