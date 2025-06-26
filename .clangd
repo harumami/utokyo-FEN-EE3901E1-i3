@@ -11,6 +11,7 @@ Diagnostics:
     - -Wmissing-prototypes
     - -Wpadded
     - -Wunsafe-buffer-usage
+    - -Wunsafe-buffer-usage-in-container
     - -Wvla
     - -Wzero-as-null-pointer-constant
 
