@@ -1,5 +1,6 @@
 use {
     ::hypha_core::{
+        Address,
         CloseHandle as RsCloseHandle,
         Connection as RsConnection,
         Instance as RsInstance,
@@ -140,7 +141,7 @@ impl Instance {
             Result::Ok(Connection(
                 this.get()
                     .0
-                    .connect::<RuntimeError, RuntimeError>(node_id.0)
+                    .connect::<RuntimeError, RuntimeError>(Address::Id(node_id.0))
                     .await?,
             ))
         })
@@ -168,7 +169,7 @@ impl Connection {
         let this = this.unbind();
 
         AudioStream(spawn_blocking(move || {
-            let _stream = match this.get().0.record::<RuntimeError, RuntimeError>() {
+            let _stream = match this.get().0.record::<RuntimeError>() {
                 Result::Ok(stream) => Option::Some(stream),
                 Result::Err(error) => {
                     error!(error = &error as &dyn Error);
@@ -186,7 +187,7 @@ impl Connection {
         let this = this.unbind();
 
         AudioStream(spawn_blocking(move || {
-            let _stream = match this.get().0.play::<RuntimeError, RuntimeError>() {
+            let _stream = match this.get().0.play::<RuntimeError>() {
                 Result::Ok(stream) => Option::Some(stream),
                 Result::Err(error) => {
                     error!(error = &error as &dyn Error);
