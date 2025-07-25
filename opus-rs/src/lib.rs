@@ -174,8 +174,8 @@ impl OpusError {
 impl Display for OpusError {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match unsafe { CStr::from_ptr(opus_strerror(self.0)) }.to_str() {
-            Result::Ok(error) => write!(f, "opus: {}", error),
-            Result::Err(error) => write!(f, "opus: {}", error),
+            Result::Ok(error) => write!(f, "opus: {error}"),
+            Result::Err(error) => write!(f, "opus: {error}"),
         }
     }
 }
