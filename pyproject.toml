@@ -1,6 +1,6 @@
 [project]
 name = "hypha"
-version = "0.0.0"
+version = "0.4.0"
 requires-python = ">=3.13"
 
 [tool.uv.workspace]
