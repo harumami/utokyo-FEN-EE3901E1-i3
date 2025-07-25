@@ -1557,7 +1557,7 @@ dependencies = [
 
 [[package]]
 name = "hypha-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "clap",
  "hypha-core",
@@ -1571,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "hypha-core"
-version = "0.0.0"
+version = "0.4.0"
 dependencies = [
  "cpal",
  "crossbeam",
@@ -1587,14 +1587,14 @@ dependencies = [
 
 [[package]]
 name = "hypha-lpc-rs"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hypha-lpc-sys",
 ]
 
 [[package]]
 name = "hypha-lpc-sys"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bindgen",
  "cmake",
@@ -1602,7 +1602,7 @@ dependencies = [
 
 [[package]]
 name = "hypha-py"
-version = "0.0.0"
+version = "0.4.0"
 dependencies = [
  "hypha-core",
  "iroh",
@@ -2753,14 +2753,14 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "opus-rs"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "opus-sys",
 ]
 
 [[package]]
 name = "opus-sys"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bindgen",
  "cmake",
@@ -3271,9 +3271,9 @@ dependencies = [
 
 [[package]]
 name = "pyo3-stub-gen"
-version = "0.10.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99fb898babb226d1c79818c8359ee2be08624804016b34c84794a759ed620cee"
+checksum = "63d3dbc1200102b11f207e8c33570bb8ec7e89a5df95265cada480c649875a17"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3293,9 +3293,9 @@ dependencies = [
 
 [[package]]
 name = "pyo3-stub-gen-derive"
-version = "0.10.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c676d00fb0665744635c41dec5c414ec7a7e09b715855de4df2b9d741782fece"
+checksum = "069ca053f5d702f2f48031ee5f2b5cf0b9e665a6213a74e119986905250cb6a9"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3927,14 +3927,14 @@ dependencies = [
 
 [[package]]
 name = "speex-rs"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "speex-sys",
 ]
 
 [[package]]
 name = "speex-sys"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bindgen",
  "cmake",
