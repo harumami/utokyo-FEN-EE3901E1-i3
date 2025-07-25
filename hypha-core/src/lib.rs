@@ -50,6 +50,7 @@ use {
         cmp::Reverse,
         error::Error,
         fmt::{
+            Debug,
             Display,
             Formatter,
             Result as FmtResult,
@@ -112,7 +113,7 @@ impl Secret {
 
 impl Display for Secret {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        self.key.fmt(f)
+        Debug::fmt(&self.key, f)
     }
 }
 
@@ -159,7 +160,6 @@ impl Instance {
             .discovery_local_network()
             .bind()
             .await
-            .map_err(|error| AnyError(error.into_boxed_dyn_error()))
             .into_error()?;
 
         Result::Ok(Self {
@@ -233,7 +233,6 @@ impl Instance {
             .endpoint
             .connect(node_id, Self::ALPN)
             .await
-            .map_err(|error| AnyError(error.into_boxed_dyn_error()))
             .into_error()?;
 
         debug!("open bi stream");
@@ -257,8 +256,8 @@ pub enum Address {
 impl Display for Address {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            Self::Id(id) => id.fmt(f),
-            Self::Direct(direct) => direct.fmt(f),
+            Self::Id(id) => Display::fmt(&id, f),
+            Self::Direct(direct) => Display::fmt(&direct, f),
         }
     }
 }
@@ -841,7 +840,7 @@ struct AnyError(Box<dyn Error + Send + Sync + 'static>);
 
 impl Display for AnyError {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
-        self.0.fmt(f)
+        Display::fmt(&self.0, f)
     }
 }
 
