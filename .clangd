@@ -18,6 +18,14 @@ Diagnostics:
 ---
 
 If:
+  PathMatch: .*\.h
+CompileFlags:
+  Add:
+    - -std=c23
+
+---
+
+If:
   PathMatch: .*\.cpp
 CompileFlags:
   Add:
