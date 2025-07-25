@@ -112,8 +112,8 @@ impl SpeexError {
 impl Display for SpeexError {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
         match unsafe { CStr::from_ptr(speex_resampler_strerror(self.0)) }.to_str() {
-            Result::Ok(error) => write!(f, "speex: {}", error),
-            Result::Err(error) => write!(f, "speex: {}", error),
+            Result::Ok(error) => write!(f, "speex: {error}"),
+            Result::Err(error) => write!(f, "speex: {error}"),
         }
     }
 }
