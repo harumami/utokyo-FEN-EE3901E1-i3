@@ -1608,6 +1608,7 @@ dependencies = [
 name = "hypha-ring"
 version = "0.0.0"
 dependencies = [
+ "crossbeam",
  "futures",
 ]
 

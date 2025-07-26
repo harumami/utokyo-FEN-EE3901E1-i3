@@ -1,7 +1,15 @@
 use {
-    ::futures::task::AtomicWaker,
+    ::crossbeam::utils::CachePadded,
+    ::futures::{
+        future::poll_fn,
+        task::AtomicWaker,
+    },
     ::std::{
-        cell::UnsafeCell,
+        cell::{
+            Cell,
+            UnsafeCell,
+        },
+        iter::from_fn,
         mem::MaybeUninit,
         sync::{
             Arc,
@@ -11,108 +19,188 @@ use {
                 Ordering,
             },
         },
+        task::Poll,
     },
 };
 
-#[derive(Clone)]
-pub struct Ring<T> {
-    inner: Arc<Inner<T>>,
+#[derive(Clone, Debug)]
+pub struct Ring<T, const N: usize> {
+    inner: Arc<Inner<T, N>>,
 }
 
-impl<T> Ring<T> {
-    pub fn new(capacity: usize) -> Self {
+impl<T, const N: usize> Ring<T, N> {
+    pub fn new() -> Self {
+        const {
+            if N == 0 {
+                panic!("N must be not 0");
+            }
+        }
+
         Self {
-            inner: Arc::new(Inner::new(capacity)),
-        }
-    }
-
-    pub fn producer(&self) -> Option<Producer<T>> {
-        Producer::new(self)
-    }
-
-    pub fn consumer(&self) -> Option<Consumer<T>> {
-        Consumer::new(self)
-    }
-}
-
-pub struct Producer<T> {
-    inner: Arc<Inner<T>>,
-}
-
-impl<T> Producer<T> {
-    pub fn new(ring: &Ring<T>) -> Option<Self> {
-        let inner = &ring.inner;
-
-        match inner.producer.fetch_or(true, Ordering::AcqRel) {
-            false => Option::Some(Self {
-                inner: inner.clone(),
+            inner: Arc::new(Inner {
+                producer: CachePadded::new(AtomicBool::new(false)),
+                consumer: CachePadded::new(AtomicBool::new(false)),
+                head: CachePadded::new(AtomicUsize::new(0)),
+                tail: CachePadded::new(AtomicUsize::new(0)),
+                waker: CachePadded::new(AtomicWaker::new()),
+                values: unsafe { MaybeUninit::<[_; N]>::uninit().assume_init() }
+                    .map(UnsafeCell::new),
             }),
-            true => Option::None,
         }
     }
-}
 
-impl<T> Drop for Producer<T> {
-    fn drop(&mut self) {
-        self.inner.producer.store(false, Ordering::Release);
+    pub fn is_empty(&self) -> bool {
+        self.inner.head.load(Ordering::Acquire) == self.inner.tail.load(Ordering::Acquire)
     }
-}
 
-pub struct Consumer<T> {
-    inner: Arc<Inner<T>>,
-}
+    pub fn len(&self) -> usize {
+        (N + self.inner.tail.load(Ordering::Acquire) - self.inner.head.load(Ordering::Acquire)) % N
+    }
 
-impl<T> Consumer<T> {
-    pub fn new(ring: &Ring<T>) -> Option<Self> {
-        let inner = &ring.inner;
-
-        match inner.consumer.fetch_or(true, Ordering::AcqRel) {
-            false => Option::Some(Self {
-                inner: inner.clone(),
+    pub fn consumer(&self) -> Option<Consumer<T, N>> {
+        match self
+            .inner
+            .consumer
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Result::Ok(_) => Option::Some(Consumer {
+                head: Cell::new(self.inner.head.load(Ordering::Acquire)),
+                inner: self.inner.clone(),
             }),
-            true => Option::None,
+            Result::Err(_) => Option::None,
+        }
+    }
+
+    pub fn producer(&self) -> Option<Producer<T, N>> {
+        match self
+            .inner
+            .producer
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Result::Ok(_) => Option::Some(Producer {
+                tail: Cell::new(self.inner.tail.load(Ordering::Acquire)),
+                inner: self.inner.clone(),
+            }),
+            Result::Err(_) => Option::None,
         }
     }
 }
 
-impl<T> Drop for Consumer<T> {
+impl<T, const N: usize> Default for Ring<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug)]
+pub struct Consumer<T, const N: usize> {
+    head: Cell<usize>,
+    inner: Arc<Inner<T, N>>,
+}
+
+impl<T, const N: usize> Consumer<T, N> {
+    pub fn is_empty(&self) -> bool {
+        self.head.get() == self.inner.tail.load(Ordering::Acquire)
+    }
+
+    pub fn len(&self) -> usize {
+        (N + self.inner.tail.load(Ordering::Acquire) - self.head.get()) % N
+    }
+
+    pub fn pop(&self) -> Option<T> {
+        let head = self.head.get();
+
+        if head == self.inner.tail.load(Ordering::Acquire) {
+            return Option::None;
+        }
+
+        let value = unsafe { (&*self.inner.values[head].get()).assume_init_read() };
+        let next_head = (head + 1) % N;
+        self.head.set(next_head);
+        self.inner.head.store(next_head, Ordering::Release);
+        Option::Some(value)
+    }
+
+    pub fn drain(&self) -> impl Iterator<Item = T> {
+        from_fn(|| self.pop())
+    }
+
+    pub fn drain_async(&self) -> impl Future<Output = impl Iterator<Item = T>> {
+        let head = self.head.get();
+
+        poll_fn(move |context| {
+            if head != self.inner.tail.load(Ordering::Acquire) {
+                return Poll::Ready(self.drain());
+            }
+
+            self.inner.waker.register(context.waker());
+
+            if head != self.inner.tail.load(Ordering::Acquire) {
+                return Poll::Ready(self.drain());
+            }
+
+            Poll::Pending
+        })
+    }
+}
+
+impl<T, const N: usize> Drop for Consumer<T, N> {
     fn drop(&mut self) {
         self.inner.consumer.store(false, Ordering::Release);
     }
 }
 
-struct Inner<T> {
-    producer: AtomicBool,
-    consumer: AtomicBool,
-    waker: AtomicWaker,
-    head: AtomicUsize,
-    tail: AtomicUsize,
-    values: UnsafeCell<Box<[MaybeUninit<T>]>>,
+#[derive(Debug)]
+pub struct Producer<T, const N: usize> {
+    tail: Cell<usize>,
+    inner: Arc<Inner<T, N>>,
 }
 
-impl<T> Inner<T> {
-    fn new(capacity: usize) -> Self {
-        Self {
-            producer: AtomicBool::new(false),
-            consumer: AtomicBool::new(false),
-            waker: AtomicWaker::new(),
-            head: AtomicUsize::new(0),
-            tail: AtomicUsize::new(0),
-            values: UnsafeCell::new(Box::new_uninit_slice(capacity)),
-        }
+impl<T, const N: usize> Producer<T, N> {
+    pub fn is_empty(&self) -> bool {
+        self.inner.head.load(Ordering::Acquire) == self.tail.get()
     }
 
-    unsafe fn push(&self, values: &[T]) {}
+    pub fn len(&self) -> usize {
+        (N + self.tail.get() - self.inner.head.load(Ordering::Acquire)) % N
+    }
+
+    pub fn push(&self, value: T) -> Result<(), T> {
+        let tail = self.tail.get();
+        let next_tail = (tail + 1) % N;
+
+        if next_tail == self.inner.head.load(Ordering::Acquire) {
+            return Result::Err(value);
+        }
+
+        unsafe { &mut *self.inner.values[tail].get() }.write(value);
+        self.tail.set(next_tail);
+        self.inner.tail.store(next_tail, Ordering::Release);
+        self.inner.waker.wake();
+        Result::Ok(())
+    }
 }
 
-impl<T> Drop for Inner<T> {
+impl<T, const N: usize> Drop for Producer<T, N> {
     fn drop(&mut self) {
-        let head = self.head.load(Ordering::Acquire);
-        let tail = self.tail.load(Ordering::Acquire);
-        let values = self.values.get_mut();
+        self.inner.producer.store(false, Ordering::Release);
+    }
+}
 
-        for i in head..tail {
-            unsafe { values[i % values.len()].assume_init_drop() };
+#[derive(Debug)]
+struct Inner<T, const N: usize> {
+    producer: CachePadded<AtomicBool>,
+    consumer: CachePadded<AtomicBool>,
+    head: CachePadded<AtomicUsize>,
+    tail: CachePadded<AtomicUsize>,
+    waker: CachePadded<AtomicWaker>,
+    values: [UnsafeCell<MaybeUninit<T>>; N],
+}
+
+impl<T, const N: usize> Drop for Inner<T, N> {
+    fn drop(&mut self) {
+        for i in self.head.load(Ordering::Acquire)..self.tail.load(Ordering::Acquire) {
+            unsafe { (&mut *self.values[i % N].get()).assume_init_drop() };
         }
     }
 }
