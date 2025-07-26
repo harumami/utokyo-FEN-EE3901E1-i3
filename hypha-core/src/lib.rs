@@ -138,8 +138,8 @@ impl Instance {
     const MAX_FRAME_SIZE: usize = Self::SAMPLE_RATE as usize * 120 / 1000;
     const MAX_PACKET_SIZE: usize = 4000;
     const RESAMPLE_QUALITY: u32 = 7;
-    const RING_SIZE: usize = Self::SAMPLE_RATE as usize * 100 / 1000;
-    const RING_THRESHOLD: usize = Self::RING_SIZE * 8 / 10;
+    const RING_SIZE: usize = Self::SAMPLE_RATE as usize * 200 / 1000;
+    const RING_THRESHOLD: usize = Self::RING_SIZE / 2;
     const SAMPLE_RATE: u32 = 48000;
 
     pub async fn bind<E: Source>(secret: Option<Secret>) -> Result<Self, E> {
