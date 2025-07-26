@@ -215,11 +215,175 @@ struct Inner<T, const N: usize> {
 
 impl<T, const N: usize> Drop for Inner<T, N> {
     fn drop(&mut self) {
-        for i in self.head.load(Ordering::Acquire)..self.tail.load(Ordering::Acquire) {
-            unsafe { (&mut *self.values[i % N].get()).assume_init_drop() };
+        let mut head = *self.head.get_mut();
+        let tail = *self.tail.get_mut();
+
+        while head != tail {
+            unsafe { (&mut *self.values[head].get()).assume_init_drop() };
+            head = (head + 1) % N;
         }
     }
 }
 
 unsafe impl<T, const N: usize> Send for Inner<T, N> {}
 unsafe impl<T, const N: usize> Sync for Inner<T, N> {}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::Ring,
+        ::std::{
+            sync::atomic::{
+                AtomicUsize,
+                Ordering,
+            },
+            thread::{
+                spawn as spawn_thread,
+                yield_now,
+            },
+            time::Duration,
+        },
+        ::tokio::{
+            task::spawn as spawn_task,
+            time::sleep,
+        },
+    };
+
+    #[test]
+    fn simple_push_and_pop() {
+        let ring = Ring::<i32, 4>::new();
+        let consumer = ring.consumer().unwrap();
+        let producer = ring.producer().unwrap();
+        assert!(ring.is_empty());
+        producer.push(10).unwrap();
+        assert!(!ring.is_empty());
+        assert_eq!(consumer.pop(), Some(10));
+        assert!(ring.is_empty());
+    }
+
+    #[test]
+    fn full_and_empty_logic() {
+        let ring = Ring::<i32, 4>::new();
+        let consumer = ring.consumer().unwrap();
+        let producer = ring.producer().unwrap();
+        assert_eq!(ring.len(), 0);
+        producer.push(1).unwrap();
+        producer.push(2).unwrap();
+        producer.push(3).unwrap();
+        assert_eq!(ring.len(), 3);
+        assert!(producer.push(4).is_err());
+        assert_eq!(consumer.pop(), Some(1));
+        assert_eq!(ring.len(), 2);
+        producer.push(4).unwrap();
+        assert_eq!(ring.len(), 3);
+        assert_eq!(consumer.pop(), Some(2));
+        assert_eq!(consumer.pop(), Some(3));
+        assert_eq!(consumer.pop(), Some(4));
+        assert_eq!(ring.len(), 0);
+        assert!(ring.is_empty());
+        assert_eq!(consumer.pop(), None);
+    }
+
+    #[test]
+    fn wrap_around_behavior() {
+        let ring = Ring::<i32, 4>::new();
+        let consumer = ring.consumer().unwrap();
+        let producer = ring.producer().unwrap();
+        producer.push(1).unwrap();
+        producer.push(2).unwrap();
+        assert_eq!(consumer.pop(), Some(1));
+        assert_eq!(consumer.pop(), Some(2));
+        producer.push(3).unwrap();
+        producer.push(4).unwrap();
+        producer.push(5).unwrap();
+        assert_eq!(ring.len(), 3);
+        assert_eq!(consumer.pop(), Some(3));
+        assert_eq!(consumer.pop(), Some(4));
+        assert_eq!(consumer.pop(), Some(5));
+        assert_eq!(consumer.pop(), None);
+    }
+
+    #[test]
+    fn spsc_threaded_transfer() {
+        let ring = Ring::<usize, 1024>::new();
+        let consumer = ring.consumer().unwrap();
+        let producer = ring.producer().unwrap();
+        let iterations = 100_000;
+
+        let producer_thread = spawn_thread(move || {
+            for i in 0..iterations {
+                while producer.push(i).is_err() {
+                    yield_now();
+                }
+            }
+        });
+
+        let consumer_thread = spawn_thread(move || {
+            for i in 0..iterations {
+                loop {
+                    if let Some(value) = consumer.pop() {
+                        assert_eq!(value, i);
+                        break;
+                    }
+
+                    yield_now();
+                }
+            }
+        });
+
+        producer_thread.join().unwrap();
+        consumer_thread.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn async_notified() {
+        let ring = Ring::<i32, 4>::new();
+
+        let consumer_handle = spawn_task({
+            let ring = ring.clone();
+
+            async move {
+                let mut consumer = ring.consumer().unwrap();
+                consumer.notified().await;
+                assert_eq!(consumer.pop(), Some(123));
+            }
+        });
+
+        let producer_handle = spawn_task({
+            let ring = ring.clone();
+
+            async move {
+                let producer = ring.producer().unwrap();
+                sleep(Duration::from_millis(10)).await;
+                producer.push(123).unwrap();
+            }
+        });
+
+        producer_handle.await.unwrap();
+        consumer_handle.await.unwrap();
+    }
+
+    #[test]
+    fn drop_cleans_up_items() {
+        static DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+        struct DropTracker;
+
+        impl Drop for DropTracker {
+            fn drop(&mut self) {
+                DROP_COUNT.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        DROP_COUNT.store(0, Ordering::SeqCst);
+
+        {
+            let ring = Ring::<DropTracker, 4>::new();
+            let _consumer = ring.consumer().unwrap();
+            let producer = ring.producer().unwrap();
+            producer.push(DropTracker).map_err(|_| ()).unwrap();
+            producer.push(DropTracker).map_err(|_| ()).unwrap();
+        }
+
+        assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 2);
+    }
+}
