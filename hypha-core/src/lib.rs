@@ -18,10 +18,14 @@ use {
             StreamTrait as _,
         },
     },
-    ::crossbeam::queue::ArrayQueue,
     ::dasp::sample::{
         FromSample,
         ToSample,
+    },
+    ::hypha_ring::{
+        Consumer,
+        Producer,
+        Ring,
     },
     ::iroh::{
         KeyParsingError,
@@ -54,7 +58,6 @@ use {
             Formatter,
             Result as FmtResult,
         },
-        iter::from_fn,
         marker::PhantomData,
         ops::Deref,
         str::FromStr,
@@ -209,8 +212,8 @@ impl Instance {
 
 #[derive(Debug)]
 pub struct Connection<E> {
-    rec_ring: Arc<RingBuffer<[f32; 2]>>,
-    play_ring: Arc<RingBuffer<[f32; 2]>>,
+    rec_ring: Ring<[f32; 2], { Instance::RING_SIZE }>,
+    play_ring: Ring<[f32; 2], { Instance::RING_SIZE }>,
     mute_handle: Arc<MuteHandle>,
     close_handle: Arc<CloseHandle>,
     send_handle: JoinHandle<Result<(), E>>,
@@ -219,11 +222,11 @@ pub struct Connection<E> {
 
 impl<E0> Connection<E0> {
     pub fn record<E1: Source>(&self) -> Result<AudioStream, E1> {
-        AudioStream::record::<_>(self.rec_ring.clone(), self.mute_handle.clone())
+        AudioStream::record::<_>(&self.rec_ring, self.mute_handle.clone())
     }
 
     pub fn play<E1: Source>(&self) -> Result<AudioStream, E1> {
-        AudioStream::play::<_>(self.play_ring.clone())
+        AudioStream::play::<_>(&self.play_ring)
     }
 
     pub fn mute_handle(&self) -> &Arc<MuteHandle> {
@@ -240,13 +243,13 @@ impl<E0: Source> Connection<E0> {
         mut send_stream: SendStream,
         mut recv_stream: RecvStream,
     ) -> Result<Self, E1> {
-        let rec_ring = Arc::new(RingBuffer::new(Instance::RING_SIZE));
-        let play_ring = Arc::new(RingBuffer::new(Instance::RING_SIZE));
+        let rec_ring = Ring::new();
+        let play_ring = Ring::new();
         let mute_handle = Arc::new(MuteHandle::new());
         let close_handle = Arc::new(CloseHandle::new());
 
         let send_handle = {
-            let rec_ring = rec_ring.clone();
+            let mut rec_consumer = rec_ring.consumer().into_error()?;
             let close_handle = close_handle.clone();
 
             spawn(async move {
@@ -255,35 +258,31 @@ impl<E0: Source> Connection<E0> {
 
                 debug!("start record loop");
 
-                let rec_loop = async {
-                    loop {
-                        rec_ring.wait().await;
+                let rec_loop = {
+                    let send_stream = &mut send_stream;
 
-                        debug!(
-                            len = rec_ring.len(),
-                            cap = rec_ring.capacity(),
-                            per = 100. * rec_ring.len() as f32 / rec_ring.capacity() as f32,
-                            "input ring",
-                        );
+                    async move {
+                        loop {
+                            rec_consumer.notified().await;
+                            encoder.input().extend(rec_consumer.drain().flatten());
 
-                        encoder.input().extend(rec_ring.drain().flatten());
+                            while encoder.ready(Instance::FRAME_SIZE) {
+                                encoder
+                                    .encode(Instance::FRAME_SIZE, Instance::MAX_PACKET_SIZE)
+                                    .into_error()?;
 
-                        while encoder.ready(Instance::FRAME_SIZE) {
-                            encoder
-                                .encode(Instance::FRAME_SIZE, Instance::MAX_PACKET_SIZE)
-                                .into_error()?;
-
-                            if !encoder.output().is_empty() {
-                                debug!("send opus packet");
-                                let len = (encoder.output().len() as u32).to_le_bytes();
-                                send_stream.write_all(&len).await.into_error()?;
-                                send_stream.write_all(encoder.output()).await.into_error()?;
+                                if !encoder.output().is_empty() {
+                                    debug!("send opus packet");
+                                    let len = (encoder.output().len() as u32).to_le_bytes();
+                                    send_stream.write_all(&len).await.into_error()?;
+                                    send_stream.write_all(encoder.output()).await.into_error()?;
+                                }
                             }
                         }
-                    }
 
-                    #[allow(unreachable_code)]
-                    Result::<_, E0>::Ok(())
+                        #[allow(unreachable_code)]
+                        Result::<_, E0>::Ok(())
+                    }
                 };
 
                 select! {
@@ -299,7 +298,7 @@ impl<E0: Source> Connection<E0> {
         };
 
         let recv_handle = {
-            let play_ring = play_ring.clone();
+            let play_producer = play_ring.producer().into_error()?;
             let close_handle = close_handle.clone();
 
             spawn(async move {
@@ -308,7 +307,7 @@ impl<E0: Source> Connection<E0> {
 
                 debug!("start play loop");
 
-                let play_loop = async {
+                let play_loop = async move {
                     loop {
                         debug!("receive opus packed");
                         let mut len = [0; 4];
@@ -317,15 +316,11 @@ impl<E0: Source> Connection<E0> {
                         recv_stream.read_exact(decoder.input()).await.into_error()?;
                         decoder.decode(Instance::MAX_FRAME_SIZE).into_error()?;
 
-                        play_ring
-                            .extend(decoder.output().chunks(2).map(|frame| [frame[0], frame[1]]));
-
-                        debug!(
-                            len = play_ring.len(),
-                            cap = play_ring.capacity(),
-                            per = 100. * play_ring.len() as f32 / play_ring.capacity() as f32,
-                            "play ring",
-                        );
+                        if let Result::Err(samples) = play_producer
+                            .extend(decoder.output().chunks(2).map(|frame| [frame[0], frame[1]]))
+                        {
+                            warn!("drop {} samples from network", samples.count());
+                        }
                     }
 
                     #[allow(unreachable_code)]
@@ -419,10 +414,11 @@ pub struct AudioStream {
 }
 
 impl AudioStream {
-    fn record<E0: Source>(
-        ring: Arc<RingBuffer<[f32; 2]>>,
+    fn record<E: Source>(
+        ring: &Ring<[f32; 2], { Instance::RING_SIZE }>,
         mute_handle: Arc<MuteHandle>,
-    ) -> Result<Self, E0> {
+    ) -> Result<Self, E> {
+        let producer = ring.producer().into_error()?;
         let host = default_host();
         debug!(host = host.id().name(), "audio host");
         let device = host.default_input_device().into_error()?;
@@ -439,37 +435,37 @@ impl AudioStream {
 
         let stream = match config.sample_format() {
             SampleFormat::I8 => {
-                Self::build_input::<i8, _>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<i8, _>(&device, &config.config(), producer, mute_handle)
             },
             SampleFormat::I16 => {
-                Self::build_input::<i16, _>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<i16, _>(&device, &config.config(), producer, mute_handle)
             },
             SampleFormat::I24 => {
-                Self::build_input::<I24, _>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<I24, _>(&device, &config.config(), producer, mute_handle)
             },
             SampleFormat::I32 => {
-                Self::build_input::<i32, _>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<i32, _>(&device, &config.config(), producer, mute_handle)
             },
             SampleFormat::I64 => {
-                Self::build_input::<i64, _>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<i64, _>(&device, &config.config(), producer, mute_handle)
             },
             SampleFormat::U8 => {
-                Self::build_input::<u8, _>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<u8, _>(&device, &config.config(), producer, mute_handle)
             },
             SampleFormat::U16 => {
-                Self::build_input::<u16, _>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<u16, _>(&device, &config.config(), producer, mute_handle)
             },
             SampleFormat::U32 => {
-                Self::build_input::<u32, _>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<u32, _>(&device, &config.config(), producer, mute_handle)
             },
             SampleFormat::U64 => {
-                Self::build_input::<u64, _>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<u64, _>(&device, &config.config(), producer, mute_handle)
             },
             SampleFormat::F32 => {
-                Self::build_input::<f32, _>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<f32, _>(&device, &config.config(), producer, mute_handle)
             },
             SampleFormat::F64 => {
-                Self::build_input::<f64, _>(&device, &config.config(), ring, mute_handle)
+                Self::build_input::<f64, _>(&device, &config.config(), producer, mute_handle)
             },
             format => fail!(AnyError(format!("unknown format: {format}").into())),
         }?;
@@ -483,12 +479,12 @@ impl AudioStream {
         })
     }
 
-    fn build_input<T: SizedSample + ToSample<f32>, E0: Source>(
+    fn build_input<T: SizedSample + ToSample<f32>, E: Source>(
         device: &Device,
         config: &StreamConfig,
-        ring: Arc<RingBuffer<[f32; 2]>>,
+        producer: Producer<[f32; 2], { Instance::RING_SIZE }>,
         mute_handle: Arc<MuteHandle>,
-    ) -> Result<ThreadBound<Stream>, E0> {
+    ) -> Result<ThreadBound<Stream>, E> {
         debug!("build input audio stream");
 
         let stereo = match config.channels {
@@ -541,7 +537,9 @@ impl AudioStream {
                             as &mut dyn Iterator<Item = _>,
                     };
 
-                    ring.extend(frames);
+                    if let Result::Err(samples) = producer.extend(frames) {
+                        warn!("drop {} samples from input", samples.count());
+                    }
                 },
                 |error| error!(error = &error as &dyn Error),
                 Option::None,
@@ -551,7 +549,8 @@ impl AudioStream {
         Result::Ok(ThreadBound::new(stream))
     }
 
-    fn play<E0: Source>(ring: Arc<RingBuffer<[f32; 2]>>) -> Result<Self, E0> {
+    fn play<E: Source>(ring: &Ring<[f32; 2], { Instance::RING_SIZE }>) -> Result<Self, E> {
+        let consumer = ring.consumer().into_error()?;
         let host = default_host();
         debug!(host = host.id().name(), "audio host");
         let device = host.default_output_device().into_error()?;
@@ -567,17 +566,17 @@ impl AudioStream {
         debug!(?config, "output audio config");
 
         let stream = match config.sample_format() {
-            SampleFormat::I8 => Self::build_output::<i8, _>(&device, &config.config(), ring),
-            SampleFormat::I16 => Self::build_output::<i16, _>(&device, &config.config(), ring),
-            SampleFormat::I24 => Self::build_output::<I24, _>(&device, &config.config(), ring),
-            SampleFormat::I32 => Self::build_output::<i32, _>(&device, &config.config(), ring),
-            SampleFormat::I64 => Self::build_output::<i64, _>(&device, &config.config(), ring),
-            SampleFormat::U8 => Self::build_output::<u8, _>(&device, &config.config(), ring),
-            SampleFormat::U16 => Self::build_output::<u16, _>(&device, &config.config(), ring),
-            SampleFormat::U32 => Self::build_output::<u32, _>(&device, &config.config(), ring),
-            SampleFormat::U64 => Self::build_output::<u64, _>(&device, &config.config(), ring),
-            SampleFormat::F32 => Self::build_output::<f32, _>(&device, &config.config(), ring),
-            SampleFormat::F64 => Self::build_output::<f64, _>(&device, &config.config(), ring),
+            SampleFormat::I8 => Self::build_output::<i8, _>(&device, &config.config(), consumer),
+            SampleFormat::I16 => Self::build_output::<i16, _>(&device, &config.config(), consumer),
+            SampleFormat::I24 => Self::build_output::<I24, _>(&device, &config.config(), consumer),
+            SampleFormat::I32 => Self::build_output::<i32, _>(&device, &config.config(), consumer),
+            SampleFormat::I64 => Self::build_output::<i64, _>(&device, &config.config(), consumer),
+            SampleFormat::U8 => Self::build_output::<u8, _>(&device, &config.config(), consumer),
+            SampleFormat::U16 => Self::build_output::<u16, _>(&device, &config.config(), consumer),
+            SampleFormat::U32 => Self::build_output::<u32, _>(&device, &config.config(), consumer),
+            SampleFormat::U64 => Self::build_output::<u64, _>(&device, &config.config(), consumer),
+            SampleFormat::F32 => Self::build_output::<f32, _>(&device, &config.config(), consumer),
+            SampleFormat::F64 => Self::build_output::<f64, _>(&device, &config.config(), consumer),
             format => fail!(AnyError(format!("unknown format: {format}").into())),
         }?;
 
@@ -590,11 +589,11 @@ impl AudioStream {
         })
     }
 
-    fn build_output<T: SizedSample + FromSample<f32>, E0: Source>(
+    fn build_output<T: SizedSample + FromSample<f32>, E: Source>(
         device: &Device,
         config: &StreamConfig,
-        ring: Arc<RingBuffer<[f32; 2]>>,
-    ) -> Result<ThreadBound<Stream>, E0> {
+        consumer: Consumer<[f32; 2], { Instance::RING_SIZE }>,
+    ) -> Result<ThreadBound<Stream>, E> {
         debug!("build output audio stream");
         let channels = config.channels;
 
@@ -635,7 +634,7 @@ impl AudioStream {
                             cursor += 1;
                         }
 
-                        if ring.len() == 0 {
+                        if consumer.is_empty() {
                             debug!("fill by equilibrium");
 
                             for data in data {
@@ -645,7 +644,7 @@ impl AudioStream {
                             return;
                         }
 
-                        let frames = ring.drain().take(
+                        let frames = consumer.drain().take(
                             data.len() * Instance::SAMPLE_RATE as usize
                                 / sample_rate as usize
                                 / channels as usize
@@ -698,45 +697,6 @@ impl AudioStream {
 
     pub fn stream(&self) -> &Stream {
         &self.stream
-    }
-}
-
-#[derive(Debug)]
-struct RingBuffer<T> {
-    queue: ArrayQueue<T>,
-    notify: Notify,
-}
-
-impl<T> RingBuffer<T> {
-    fn new(capacity: usize) -> Self {
-        Self {
-            queue: ArrayQueue::new(capacity),
-            notify: Notify::new(),
-        }
-    }
-
-    fn capacity(&self) -> usize {
-        self.queue.capacity()
-    }
-
-    fn len(&self) -> usize {
-        self.queue.len()
-    }
-
-    fn extend(&self, values: impl Iterator<Item = T>) {
-        for value in values {
-            self.queue.force_push(value);
-        }
-
-        self.notify.notify_waiters();
-    }
-
-    fn drain(&self) -> impl Iterator<Item = T> {
-        from_fn(|| self.queue.pop())
-    }
-
-    async fn wait(&self) {
-        self.notify.notified().await;
     }
 }
 

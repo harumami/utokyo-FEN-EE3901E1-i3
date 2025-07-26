@@ -9,7 +9,10 @@ use {
             Cell,
             UnsafeCell,
         },
-        iter::from_fn,
+        iter::{
+            from_fn,
+            once,
+        },
         mem::MaybeUninit,
         sync::{
             Arc,
@@ -125,18 +128,18 @@ impl<T, const N: usize> Consumer<T, N> {
         from_fn(|| self.pop())
     }
 
-    pub fn drain_async(&self) -> impl Future<Output = impl Iterator<Item = T>> {
+    pub fn notified(&mut self) -> impl Send + Future<Output = ()> {
         let head = self.head.get();
 
         poll_fn(move |context| {
             if head != self.inner.tail.load(Ordering::Acquire) {
-                return Poll::Ready(self.drain());
+                return Poll::Ready(());
             }
 
             self.inner.waker.register(context.waker());
 
             if head != self.inner.tail.load(Ordering::Acquire) {
-                return Poll::Ready(self.drain());
+                return Poll::Ready(());
             }
 
             Poll::Pending
@@ -179,6 +182,19 @@ impl<T, const N: usize> Producer<T, N> {
         self.inner.waker.wake();
         Result::Ok(())
     }
+
+    pub fn extend(
+        &self,
+        mut values: impl Iterator<Item = T>,
+    ) -> Result<(), impl Iterator<Item = T>> {
+        while let Option::Some(value) = values.next() {
+            if let Result::Err(value) = self.push(value) {
+                return Result::Err(once(value).chain(values));
+            }
+        }
+
+        Result::Ok(())
+    }
 }
 
 impl<T, const N: usize> Drop for Producer<T, N> {
@@ -204,3 +220,6 @@ impl<T, const N: usize> Drop for Inner<T, N> {
         }
     }
 }
+
+unsafe impl<T, const N: usize> Send for Inner<T, N> {}
+unsafe impl<T, const N: usize> Sync for Inner<T, N> {}

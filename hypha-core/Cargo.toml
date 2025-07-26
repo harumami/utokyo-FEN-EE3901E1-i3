@@ -12,5 +12,6 @@ rancor.workspace = true
 rand.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+hypha-ring.workspace = true
 opus-rs.workspace = true
-speex-rs = { workspace = true }
+speex-rs.workspace = true
