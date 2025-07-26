@@ -1,5 +1,6 @@
 use {
     ::cpal::{
+        I24,
         SampleFormat,
         SampleRate,
         SizedSample,
@@ -20,7 +21,6 @@ use {
     ::crossbeam::queue::ArrayQueue,
     ::dasp::sample::{
         FromSample,
-        I24,
         ToSample,
     },
     ::iroh::{
