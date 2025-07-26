@@ -397,13 +397,13 @@ impl ToggleHandle {
         }
     }
 
+    pub fn is_on(&self) -> bool {
+        self.on.load(Ordering::Acquire)
+    }
+
     pub fn toggle(&self) {
         let on = !self.on.fetch_xor(true, Ordering::AcqRel);
         debug!(on, "toggled");
-    }
-
-    pub fn is_on(&self) -> bool {
-        self.on.load(Ordering::Acquire)
     }
 }
 
