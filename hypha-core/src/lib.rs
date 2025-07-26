@@ -30,8 +30,10 @@ use {
     ::iroh::{
         KeyParsingError,
         NodeId,
+        PublicKey,
         SecretKey,
         endpoint::{
+            Connection,
             Endpoint,
             RecvStream,
             SendStream,
@@ -86,11 +88,11 @@ use {
 };
 
 #[derive(Clone, Debug)]
-pub struct Secret {
+pub struct SecretId {
     key: SecretKey,
 }
 
-impl Secret {
+impl SecretId {
     pub fn new(key: SecretKey) -> Self {
         Self {
             key,
@@ -101,8 +103,8 @@ impl Secret {
         Self::new(SecretKey::generate(OsRng))
     }
 
-    pub fn node_id(&self) -> NodeId {
-        self.key.public()
+    pub fn public(&self) -> PublicId {
+        PublicId::new(self.key.public())
     }
 
     pub fn key(&self) -> &SecretKey {
@@ -110,19 +112,48 @@ impl Secret {
     }
 }
 
-impl Display for Secret {
+impl Display for SecretId {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         Debug::fmt(&self.key, f)
     }
 }
 
-impl FromStr for Secret {
+impl FromStr for SecretId {
     type Err = KeyParsingError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Result::Ok(Self {
-            key: SecretKey::from_str(s)?,
-        })
+        SecretKey::from_str(s).map(Self::new)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct PublicId {
+    key: PublicKey,
+}
+
+impl PublicId {
+    fn new(key: PublicKey) -> Self {
+        Self {
+            key,
+        }
+    }
+
+    pub fn key(&self) -> &PublicKey {
+        &self.key
+    }
+}
+
+impl Display for PublicId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        Display::fmt(&self.key, f)
+    }
+}
+
+impl FromStr for PublicId {
+    type Err = KeyParsingError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        PublicKey::from_str(s).map(Self::new)
     }
 }
 
@@ -142,14 +173,14 @@ impl Instance {
     const RING_THRESHOLD: usize = Self::RING_SIZE / 2;
     const SAMPLE_RATE: u32 = 48000;
 
-    pub async fn bind<E: Source>(secret: Option<Secret>) -> Result<Self, E> {
+    pub async fn bind<E: Source>(secret: Option<SecretId>) -> Result<Self, E> {
         let secret = match secret {
             Option::Some(secret) => secret,
-            Option::None => Secret::generate(),
+            Option::None => SecretId::generate(),
         };
 
-        let id = secret.node_id();
-        trace!(%secret, %id);
+        let public = secret.public();
+        trace!(%secret, %public);
         debug!("open endpoint");
 
         let endpoint = Endpoint::builder()
@@ -169,7 +200,7 @@ impl Instance {
         &self.endpoint
     }
 
-    pub async fn accept<E0: Source, E1: Source>(&self) -> Result<Connection<E0>, E1> {
+    pub async fn accept<E: Source>(&self) -> Result<Peer, E> {
         debug!("accept connection");
 
         let connection = loop {
@@ -182,27 +213,19 @@ impl Instance {
             }
         };
 
-        debug!("accept bi stream");
-        let (send_stream, mut recv_stream) = connection.accept_bi().await.into_error()?;
-        let mut buffer = [0];
-        recv_stream.read_exact(&mut buffer).await.into_error()?;
-
-        if buffer != [0] {
-            fail!(AnyError("connection is broken"));
-        }
-
-        let connection = Connection::new(send_stream, recv_stream)?;
-        Result::Ok(connection)
+        Result::Ok(Peer::new(connection))
     }
 
-    pub async fn connect<E0: Source, E1: Source>(&self, id: NodeId) -> Result<Connection<E0>, E1> {
+    pub async fn connect<E: Source>(&self, id: PublicId) -> Result<Peer, E> {
         debug!(%id, "connect to");
-        let connection = self.endpoint.connect(id, Self::ALPN).await.into_error()?;
-        debug!("open bi stream");
-        let (mut send_stream, recv_stream) = connection.open_bi().await.into_error()?;
-        send_stream.write_all(&[0]).await.into_error()?;
-        let connection = Connection::new(send_stream, recv_stream)?;
-        Result::Ok(connection)
+
+        let connection = self
+            .endpoint
+            .connect(*id.key(), Self::ALPN)
+            .await
+            .into_error()?;
+
+        Result::Ok(Peer::new(connection))
     }
 
     pub async fn close(&self) {
@@ -211,17 +234,78 @@ impl Instance {
 }
 
 #[derive(Debug)]
-pub struct Connection<E> {
+pub struct Peer {
+    connection: Connection,
     rec_ring: Ring<[f32; 2], { Instance::RING_SIZE }>,
     play_ring: Ring<[f32; 2], { Instance::RING_SIZE }>,
     mute_handle: Arc<ToggleHandle>,
     deafen_handle: Arc<ToggleHandle>,
     close_handle: Arc<CloseHandle>,
-    send_handle: JoinHandle<Result<(), E>>,
-    recv_handle: JoinHandle<Result<(), E>>,
 }
 
-impl<E0> Connection<E0> {
+impl Peer {
+    fn new(connection: Connection) -> Self {
+        Self {
+            connection,
+            rec_ring: Ring::new(),
+            play_ring: Ring::new(),
+            mute_handle: Arc::new(ToggleHandle::new()),
+            deafen_handle: Arc::new(ToggleHandle::new()),
+            close_handle: Arc::new(CloseHandle::new()),
+        }
+    }
+
+    pub async fn accept_stream<E0: Source, E1: Source>(&self) -> Result<DataStream<E0>, E1> {
+        debug!("accept bi stream");
+        let (send_stream, mut recv_stream) = self.connection.accept_bi().await.into_error()?;
+
+        let mut buffer = [0];
+        recv_stream.read_exact(&mut buffer).await.into_error()?;
+
+        if buffer != [0] {
+            fail!(AnyError("connection is broken"));
+        }
+
+        let rec_consumer = self.rec_ring.consumer().into_error()?;
+        let play_producer = self.play_ring.producer().into_error()?;
+
+        let stream = DataStream::new(
+            send_stream,
+            recv_stream,
+            rec_consumer,
+            play_producer,
+            &self.close_handle,
+        )?;
+
+        Result::Ok(stream)
+    }
+
+    pub async fn open_stream<E0: Source, E1: Source>(&self) -> Result<DataStream<E0>, E1> {
+        debug!("open bi stream");
+        let (mut send_stream, recv_stream) = self.connection.open_bi().await.into_error()?;
+        send_stream.write_all(&[0]).await.into_error()?;
+        let rec_consumer = self.rec_ring.consumer().into_error()?;
+        let play_producer = self.play_ring.producer().into_error()?;
+
+        let stream = DataStream::new(
+            send_stream,
+            recv_stream,
+            rec_consumer,
+            play_producer,
+            &self.close_handle,
+        )?;
+
+        Result::Ok(stream)
+    }
+
+    pub fn record_stream<E: Source>(&self) -> Result<AudioStream, E> {
+        AudioStream::record::<_>(&self.rec_ring, &self.mute_handle)
+    }
+
+    pub fn play_stream<E: Source>(&self) -> Result<AudioStream, E> {
+        AudioStream::play::<_>(&self.play_ring, &self.deafen_handle)
+    }
+
     pub fn mute_handle(&self) -> &Arc<ToggleHandle> {
         &self.mute_handle
     }
@@ -233,29 +317,22 @@ impl<E0> Connection<E0> {
     pub fn close_handle(&self) -> &Arc<CloseHandle> {
         &self.close_handle
     }
-
-    pub fn record<E1: Source>(&self) -> Result<AudioStream, E1> {
-        AudioStream::record::<_>(&self.rec_ring, &self.mute_handle)
-    }
-
-    pub fn play<E1: Source>(&self) -> Result<AudioStream, E1> {
-        AudioStream::play::<_>(&self.play_ring, &self.deafen_handle)
-    }
 }
 
-impl<E0: Source> Connection<E0> {
+pub struct DataStream<E> {
+    send_handle: JoinHandle<Result<(), E>>,
+    recv_handle: JoinHandle<Result<(), E>>,
+}
+
+impl<E0: Source> DataStream<E0> {
     fn new<E1: Source>(
         mut send_stream: SendStream,
         mut recv_stream: RecvStream,
+        mut rec_consumer: Consumer<[f32; 2], { Instance::RING_SIZE }>,
+        play_producer: Producer<[f32; 2], { Instance::RING_SIZE }>,
+        close_handle: &Arc<CloseHandle>,
     ) -> Result<Self, E1> {
-        let rec_ring = Ring::new();
-        let play_ring = Ring::new();
-        let mute_handle = Arc::new(ToggleHandle::new());
-        let deafen_handle = Arc::new(ToggleHandle::new());
-        let close_handle = Arc::new(CloseHandle::new());
-
         let send_handle = {
-            let mut rec_consumer = rec_ring.consumer().into_error()?;
             let close_handle = close_handle.clone();
 
             spawn(async move {
@@ -306,7 +383,6 @@ impl<E0: Source> Connection<E0> {
         };
 
         let recv_handle = {
-            let play_producer = play_ring.producer().into_error()?;
             let close_handle = close_handle.clone();
 
             spawn(async move {
@@ -358,11 +434,6 @@ impl<E0: Source> Connection<E0> {
         };
 
         Result::Ok(Self {
-            rec_ring,
-            play_ring,
-            mute_handle,
-            deafen_handle,
-            close_handle,
             send_handle,
             recv_handle,
         })
@@ -382,49 +453,6 @@ impl<E0: Source> Connection<E0> {
         }
 
         Result::Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct ToggleHandle {
-    on: AtomicBool,
-}
-
-impl ToggleHandle {
-    fn new() -> Self {
-        Self {
-            on: AtomicBool::new(false),
-        }
-    }
-
-    pub fn is_on(&self) -> bool {
-        self.on.load(Ordering::Acquire)
-    }
-
-    pub fn toggle(&self) {
-        let on = !self.on.fetch_xor(true, Ordering::AcqRel);
-        debug!(on, "toggled");
-    }
-}
-
-#[derive(Debug)]
-pub struct CloseHandle {
-    notify: Notify,
-}
-
-impl CloseHandle {
-    fn new() -> Self {
-        Self {
-            notify: Notify::new(),
-        }
-    }
-
-    pub fn close(&self) {
-        self.notify.notify_waiters();
-    }
-
-    async fn wait(&self) {
-        self.notify.notified().await;
     }
 }
 
@@ -756,6 +784,49 @@ impl AudioStream {
 
     pub fn stream(&self) -> &Stream {
         &self.stream
+    }
+}
+
+#[derive(Debug)]
+pub struct ToggleHandle {
+    on: AtomicBool,
+}
+
+impl ToggleHandle {
+    fn new() -> Self {
+        Self {
+            on: AtomicBool::new(false),
+        }
+    }
+
+    pub fn is_on(&self) -> bool {
+        self.on.load(Ordering::Acquire)
+    }
+
+    pub fn toggle(&self) {
+        let on = !self.on.fetch_xor(true, Ordering::AcqRel);
+        debug!(on, "toggled");
+    }
+}
+
+#[derive(Debug)]
+pub struct CloseHandle {
+    notify: Notify,
+}
+
+impl CloseHandle {
+    fn new() -> Self {
+        Self {
+            notify: Notify::new(),
+        }
+    }
+
+    pub fn close(&self) {
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        self.notify.notified().await;
     }
 }
 

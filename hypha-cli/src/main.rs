@@ -5,9 +5,9 @@ use {
     },
     ::hypha_core::{
         Instance,
-        Secret,
+        PublicId,
+        SecretId,
     },
-    ::iroh::NodeId,
     ::rancor::{
         BoxedError,
         ResultExt as _,
@@ -103,9 +103,9 @@ fn init() -> Result<Result<(Command, WorkerGuard), ExitCode>, BoxedError> {
 fn run(command: Command) -> Result<(), BoxedError> {
     let (secret, method) = match command {
         Command::Generate => {
-            let secret = Secret::generate();
-            println!("Your SECRET: {secret}");
-            println!("Your ID: {}", secret.node_id());
+            let secret = SecretId::generate();
+            println!("Your SECRET ID: {secret}");
+            println!("Your public ID: {}", secret.public());
             return Result::Ok(());
         },
         Command::Host {
@@ -118,16 +118,28 @@ fn run(command: Command) -> Result<(), BoxedError> {
 
     let runtime = Runtime::new().into_error()?;
     let instance = runtime.block_on(Instance::bind(secret))?;
-    println!("Your ID: {}", instance.endpoint().secret_key().public());
 
-    let connection = runtime.block_on(async {
-        match method {
-            Method::Host => instance.accept::<BoxedError, _>().await,
-            Method::Join(address) => instance.connect::<BoxedError, _>(address).await,
-        }
+    println!(
+        "Your public ID: {}",
+        instance.endpoint().secret_key().public()
+    );
+
+    let (peer, data_stream) = runtime.block_on(async {
+        Result::Ok(match method {
+            Method::Host => {
+                let peer = instance.accept().await?;
+                let data_stream = peer.accept_stream::<BoxedError, _>().await?;
+                (peer, data_stream)
+            },
+            Method::Join(id) => {
+                let peer = instance.connect(id).await?;
+                let data_stream = peer.open_stream::<BoxedError, _>().await?;
+                (peer, data_stream)
+            },
+        })
     })?;
 
-    let _recorder = match connection.record::<BoxedError>() {
+    let _rec_stream = match peer.record_stream() {
         Result::Ok(recorder) => Option::Some(recorder),
         Result::Err(error) => {
             info!(error = &error as &dyn Error);
@@ -135,7 +147,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
         },
     };
 
-    let _player = match connection.play::<BoxedError>() {
+    let _play_stream = match peer.play_stream() {
         Result::Ok(player) => Option::Some(player),
         Result::Err(error) => {
             info!(error = &error as &dyn Error);
@@ -143,9 +155,9 @@ fn run(command: Command) -> Result<(), BoxedError> {
         },
     };
 
-    let mute_handle = connection.mute_handle().clone();
-    let deafen_handle = connection.deafen_handle().clone();
-    let close_handle = connection.close_handle().clone();
+    let mute_handle = peer.mute_handle().clone();
+    let deafen_handle = peer.deafen_handle().clone();
+    let close_handle = peer.close_handle().clone();
 
     runtime.spawn(async move {
         let mut reader = BufReader::new(stdin());
@@ -192,7 +204,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
     });
 
     println!("Let's talk! ('M' to mute, 'D' to deafen, 'Q' to exit)");
-    runtime.block_on(connection.join())?;
+    runtime.block_on(data_stream.join())?;
     println!("Bye.");
     runtime.block_on(instance.close());
     Result::Ok(())
@@ -212,14 +224,14 @@ enum Command {
     Generate,
     Host {
         #[clap(long)]
-        secret: Option<Secret>,
+        secret: Option<SecretId>,
     },
     Join {
-        id: NodeId,
+        id: PublicId,
     },
 }
 
 enum Method {
     Host,
-    Join(NodeId),
+    Join(PublicId),
 }
