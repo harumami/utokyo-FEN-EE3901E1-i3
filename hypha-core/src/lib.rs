@@ -214,7 +214,8 @@ impl Instance {
 pub struct Connection<E> {
     rec_ring: Ring<[f32; 2], { Instance::RING_SIZE }>,
     play_ring: Ring<[f32; 2], { Instance::RING_SIZE }>,
-    mute_handle: Arc<MuteHandle>,
+    mute_handle: Arc<ToggleHandle>,
+    deafen_handle: Arc<ToggleHandle>,
     close_handle: Arc<CloseHandle>,
     send_handle: JoinHandle<Result<(), E>>,
     recv_handle: JoinHandle<Result<(), E>>,
@@ -222,15 +223,19 @@ pub struct Connection<E> {
 
 impl<E0> Connection<E0> {
     pub fn record<E1: Source>(&self) -> Result<AudioStream, E1> {
-        AudioStream::record::<_>(&self.rec_ring, self.mute_handle.clone())
+        AudioStream::record::<_>(&self.rec_ring, &self.mute_handle)
     }
 
     pub fn play<E1: Source>(&self) -> Result<AudioStream, E1> {
-        AudioStream::play::<_>(&self.play_ring)
+        AudioStream::play::<_>(&self.play_ring, &self.deafen_handle)
     }
 
-    pub fn mute_handle(&self) -> &Arc<MuteHandle> {
+    pub fn mute_handle(&self) -> &Arc<ToggleHandle> {
         &self.mute_handle
+    }
+
+    pub fn deafen_handle(&self) -> &Arc<ToggleHandle> {
+        &self.deafen_handle
     }
 
     pub fn close_handle(&self) -> &Arc<CloseHandle> {
@@ -245,7 +250,8 @@ impl<E0: Source> Connection<E0> {
     ) -> Result<Self, E1> {
         let rec_ring = Ring::new();
         let play_ring = Ring::new();
-        let mute_handle = Arc::new(MuteHandle::new());
+        let mute_handle = Arc::new(ToggleHandle::new());
+        let deafen_handle = Arc::new(ToggleHandle::new());
         let close_handle = Arc::new(CloseHandle::new());
 
         let send_handle = {
@@ -354,10 +360,11 @@ impl<E0: Source> Connection<E0> {
         Result::Ok(Self {
             rec_ring,
             play_ring,
+            mute_handle,
+            deafen_handle,
             close_handle,
             send_handle,
             recv_handle,
-            mute_handle,
         })
     }
 
@@ -379,24 +386,24 @@ impl<E0: Source> Connection<E0> {
 }
 
 #[derive(Debug)]
-pub struct MuteHandle {
-    muted: AtomicBool,
+pub struct ToggleHandle {
+    on: AtomicBool,
 }
 
-impl MuteHandle {
+impl ToggleHandle {
     fn new() -> Self {
         Self {
-            muted: AtomicBool::new(false),
+            on: AtomicBool::new(false),
         }
     }
 
     pub fn toggle(&self) {
-        let old = self.muted.fetch_xor(true, Ordering::AcqRel);
-        debug!(muted = !old, "toggled mute");
+        let on = !self.on.fetch_xor(true, Ordering::AcqRel);
+        debug!(on, "toggled");
     }
 
-    pub fn is_muted(&self) -> bool {
-        self.muted.load(Ordering::Acquire)
+    pub fn is_on(&self) -> bool {
+        self.on.load(Ordering::Acquire)
     }
 }
 
@@ -430,7 +437,7 @@ pub struct AudioStream {
 impl AudioStream {
     fn record<E: Source>(
         ring: &Ring<[f32; 2], { Instance::RING_SIZE }>,
-        mute_handle: Arc<MuteHandle>,
+        mute_handle: &Arc<ToggleHandle>,
     ) -> Result<Self, E> {
         let producer = ring.producer().into_error()?;
         let host = default_host();
@@ -446,6 +453,7 @@ impl AudioStream {
         configs.sort_by_key(Self::config_sort_key);
         let config = configs.first().into_error()?.with_max_sample_rate();
         debug!(?config, "input audio config");
+        let mute_handle = mute_handle.clone();
 
         let stream = match config.sample_format() {
             SampleFormat::I8 => {
@@ -497,7 +505,7 @@ impl AudioStream {
         device: &Device,
         config: &StreamConfig,
         producer: Producer<[f32; 2], { Instance::RING_SIZE }>,
-        mute_handle: Arc<MuteHandle>,
+        mute_handle: Arc<ToggleHandle>,
     ) -> Result<ThreadBound<Stream>, E> {
         debug!("build input audio stream");
 
@@ -532,7 +540,7 @@ impl AudioStream {
                         return;
                     }
 
-                    if mute_handle.is_muted() {
+                    if mute_handle.is_on() {
                         debug!("stream is muted");
                         return;
                     }
@@ -563,7 +571,10 @@ impl AudioStream {
         Result::Ok(ThreadBound::new(stream))
     }
 
-    fn play<E: Source>(ring: &Ring<[f32; 2], { Instance::RING_SIZE }>) -> Result<Self, E> {
+    fn play<E: Source>(
+        ring: &Ring<[f32; 2], { Instance::RING_SIZE }>,
+        deafen_handle: &Arc<ToggleHandle>,
+    ) -> Result<Self, E> {
         let consumer = ring.consumer().into_error()?;
         let host = default_host();
         debug!(host = host.id().name(), "audio host");
@@ -578,19 +589,42 @@ impl AudioStream {
         configs.sort_by_key(Self::config_sort_key);
         let config = configs.first().into_error()?.with_max_sample_rate();
         debug!(?config, "output audio config");
+        let deafen_handle = deafen_handle.clone();
 
         let stream = match config.sample_format() {
-            SampleFormat::I8 => Self::build_output::<i8, _>(&device, &config.config(), consumer),
-            SampleFormat::I16 => Self::build_output::<i16, _>(&device, &config.config(), consumer),
-            SampleFormat::I24 => Self::build_output::<I24, _>(&device, &config.config(), consumer),
-            SampleFormat::I32 => Self::build_output::<i32, _>(&device, &config.config(), consumer),
-            SampleFormat::I64 => Self::build_output::<i64, _>(&device, &config.config(), consumer),
-            SampleFormat::U8 => Self::build_output::<u8, _>(&device, &config.config(), consumer),
-            SampleFormat::U16 => Self::build_output::<u16, _>(&device, &config.config(), consumer),
-            SampleFormat::U32 => Self::build_output::<u32, _>(&device, &config.config(), consumer),
-            SampleFormat::U64 => Self::build_output::<u64, _>(&device, &config.config(), consumer),
-            SampleFormat::F32 => Self::build_output::<f32, _>(&device, &config.config(), consumer),
-            SampleFormat::F64 => Self::build_output::<f64, _>(&device, &config.config(), consumer),
+            SampleFormat::I8 => {
+                Self::build_output::<i8, _>(&device, &config.config(), consumer, deafen_handle)
+            },
+            SampleFormat::I16 => {
+                Self::build_output::<i16, _>(&device, &config.config(), consumer, deafen_handle)
+            },
+            SampleFormat::I24 => {
+                Self::build_output::<I24, _>(&device, &config.config(), consumer, deafen_handle)
+            },
+            SampleFormat::I32 => {
+                Self::build_output::<i32, _>(&device, &config.config(), consumer, deafen_handle)
+            },
+            SampleFormat::I64 => {
+                Self::build_output::<i64, _>(&device, &config.config(), consumer, deafen_handle)
+            },
+            SampleFormat::U8 => {
+                Self::build_output::<u8, _>(&device, &config.config(), consumer, deafen_handle)
+            },
+            SampleFormat::U16 => {
+                Self::build_output::<u16, _>(&device, &config.config(), consumer, deafen_handle)
+            },
+            SampleFormat::U32 => {
+                Self::build_output::<u32, _>(&device, &config.config(), consumer, deafen_handle)
+            },
+            SampleFormat::U64 => {
+                Self::build_output::<u64, _>(&device, &config.config(), consumer, deafen_handle)
+            },
+            SampleFormat::F32 => {
+                Self::build_output::<f32, _>(&device, &config.config(), consumer, deafen_handle)
+            },
+            SampleFormat::F64 => {
+                Self::build_output::<f64, _>(&device, &config.config(), consumer, deafen_handle)
+            },
             format => fail!(AnyError(format!("unknown format: {format}").into())),
         }?;
 
@@ -607,6 +641,7 @@ impl AudioStream {
         device: &Device,
         config: &StreamConfig,
         consumer: Consumer<[f32; 2], { Instance::RING_SIZE }>,
+        deafen_handle: Arc<ToggleHandle>,
     ) -> Result<ThreadBound<Stream>, E> {
         debug!("build output audio stream");
         let channels = config.channels;
@@ -637,6 +672,16 @@ impl AudioStream {
                 move |data, _| {
                     debug!(len = data.len(), "play output frames");
                     let mut data = data.iter_mut();
+
+                    if deafen_handle.is_on() {
+                        debug!("stream is deafened");
+
+                        for data in data {
+                            *data = T::EQUILIBRIUM;
+                        }
+
+                        return;
+                    }
 
                     loop {
                         while cursor < resampler.output().len() {
