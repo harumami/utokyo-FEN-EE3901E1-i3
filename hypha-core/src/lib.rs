@@ -264,6 +264,8 @@ impl<E0: Source> Connection<E0> {
                     async move {
                         loop {
                             rec_consumer.notified().await;
+                            debug!(rec_ring.len = rec_consumer.len());
+
                             encoder.input().extend(rec_consumer.drain().flatten());
 
                             while encoder.ready(Instance::FRAME_SIZE) {
@@ -321,6 +323,8 @@ impl<E0: Source> Connection<E0> {
                         {
                             warn!("drop {} samples from network", samples.count());
                         }
+
+                        debug!(play_ring.len = play_producer.len());
                     }
 
                     #[allow(unreachable_code)]
