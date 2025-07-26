@@ -148,9 +148,8 @@ impl Instance {
             Option::None => Secret::generate(),
         };
 
-        trace!("use {secret} as secret");
-        let node_id = secret.node_id();
-        trace!("use {node_id} as node id");
+        let id = secret.node_id();
+        trace!(%secret, %id);
         debug!("open endpoint");
 
         let endpoint = Endpoint::builder()
@@ -320,13 +319,19 @@ impl<E0: Source> Connection<E0> {
                         decoder.decode(Instance::MAX_FRAME_SIZE).into_error()?;
 
                         if play_producer.len() > Instance::RING_THRESHOLD {
+                            debug!(
+                                len = play_producer.len(),
+                                threshold = Instance::RING_THRESHOLD,
+                                "play_ring level exceeded threshold"
+                            );
+
                             continue;
                         }
 
                         if let Result::Err(samples) = play_producer
                             .extend(decoder.output().chunks(2).map(|frame| [frame[0], frame[1]]))
                         {
-                            warn!("drop {} samples from network", samples.count());
+                            warn!(count = samples.count(), "drop samples from network");
                         }
 
                         debug!(play_ring.len = play_producer.len());
@@ -547,7 +552,7 @@ impl AudioStream {
                     };
 
                     if let Result::Err(samples) = producer.extend(frames) {
-                        warn!("drop {} samples from device", samples.count());
+                        warn!(count = samples.count(), "drop samples from device");
                     }
                 },
                 |error| error!(error = &error as &dyn Error),
