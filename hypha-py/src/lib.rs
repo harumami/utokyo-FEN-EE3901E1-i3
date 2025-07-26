@@ -1,5 +1,7 @@
 use {
+    ::cpal::traits::DeviceTrait as _,
     ::hypha_core::{
+        AudioStream as RsAudioStream,
         CloseHandle as RsCloseHandle,
         DataStream as RsDataStream,
         Instance as RsInstance,
@@ -48,7 +50,10 @@ use {
         time::Duration,
     },
     ::tokio::{
-        sync::Mutex,
+        sync::{
+            Mutex,
+            oneshot::channel,
+        },
         task::{
             JoinHandle,
             spawn_blocking,
@@ -190,40 +195,14 @@ impl Peer {
         })
     }
 
-    fn record_stream(this: Bound<Self>) -> AudioStream {
+    fn record_stream(this: Bound<Self>) -> Result<AudioStream, RuntimeError> {
         let this = this.unbind();
-
-        AudioStream(spawn_blocking(move || {
-            let _stream = match this.get().0.record_stream::<RuntimeError>() {
-                Result::Ok(stream) => Option::Some(stream),
-                Result::Err(error) => {
-                    error!(error = &error as &dyn Error);
-                    Option::None
-                },
-            };
-
-            loop {
-                sleep(Duration::from_secs(1024));
-            }
-        }))
+        AudioStream::new(move || this.get().0.record_stream())
     }
 
-    fn play_stream(this: Bound<Self>) -> AudioStream {
+    fn play_stream(this: Bound<Self>) -> Result<AudioStream, RuntimeError> {
         let this = this.unbind();
-
-        AudioStream(spawn_blocking(move || {
-            let _stream = match this.get().0.play_stream::<RuntimeError>() {
-                Result::Ok(stream) => Option::Some(stream),
-                Result::Err(error) => {
-                    error!(error = &error as &dyn Error);
-                    Option::None
-                },
-            };
-
-            loop {
-                sleep(Duration::from_secs(1024));
-            }
-        }))
+        AudioStream::new(move || this.get().0.play_stream())
     }
 
     fn mute_handle(&self) -> ToggleHandle {
@@ -267,7 +246,67 @@ impl DataStream {
 
 #[gen_stub_pyclass]
 #[pyclass(frozen)]
-struct AudioStream(#[allow(dead_code)] JoinHandle<()>);
+struct AudioStream {
+    host: &'static str,
+    device: String,
+    _join_handle: JoinHandle<()>,
+}
+
+impl AudioStream {
+    fn new(
+        f: impl 'static + FnOnce() -> Result<RsAudioStream, RuntimeError> + Send,
+    ) -> Result<Self, RuntimeError> {
+        let (sender, receiver) = channel();
+
+        let join_handle = spawn_blocking(move || {
+            let _stream = match (|| {
+                let stream = f()?;
+                let host = stream.host().id().name();
+                let device = stream.device().name().into_error()?;
+                Result::<_, RuntimeError>::Ok((stream, host, device))
+            })() {
+                Result::Ok((stream, host, device)) => {
+                    if sender.send(Result::Ok((host, device))).is_err() {
+                        error!("cannot send a result");
+                    }
+
+                    stream
+                },
+                Result::Err(error) => {
+                    if sender.send(Result::Err(error)).is_err() {
+                        error!("cannot send a result");
+                    }
+
+                    return;
+                },
+            };
+
+            loop {
+                sleep(Duration::from_secs(1024));
+            }
+        });
+
+        let (host, device) = receiver.blocking_recv().into_error()??;
+
+        Result::Ok(Self {
+            host,
+            device,
+            _join_handle: join_handle,
+        })
+    }
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl AudioStream {
+    fn host(&self) -> &'static str {
+        self.host
+    }
+
+    fn device(&self) -> &str {
+        &self.device
+    }
+}
 
 #[gen_stub_pyclass]
 #[pyclass(frozen)]

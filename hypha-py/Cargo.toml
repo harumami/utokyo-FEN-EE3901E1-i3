@@ -8,6 +8,7 @@ name = "hypha_py"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+cpal.workspace = true
 iroh.workspace = true
 pyo3 = { workspace = true, features = ["abi3"] }
 pyo3-async-runtimes = { workspace = true, features = ["tokio-runtime"] }
