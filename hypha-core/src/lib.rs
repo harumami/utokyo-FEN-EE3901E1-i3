@@ -222,14 +222,6 @@ pub struct Connection<E> {
 }
 
 impl<E0> Connection<E0> {
-    pub fn record<E1: Source>(&self) -> Result<AudioStream, E1> {
-        AudioStream::record::<_>(&self.rec_ring, &self.mute_handle)
-    }
-
-    pub fn play<E1: Source>(&self) -> Result<AudioStream, E1> {
-        AudioStream::play::<_>(&self.play_ring, &self.deafen_handle)
-    }
-
     pub fn mute_handle(&self) -> &Arc<ToggleHandle> {
         &self.mute_handle
     }
@@ -240,6 +232,14 @@ impl<E0> Connection<E0> {
 
     pub fn close_handle(&self) -> &Arc<CloseHandle> {
         &self.close_handle
+    }
+
+    pub fn record<E1: Source>(&self) -> Result<AudioStream, E1> {
+        AudioStream::record::<_>(&self.rec_ring, &self.mute_handle)
+    }
+
+    pub fn play<E1: Source>(&self) -> Result<AudioStream, E1> {
+        AudioStream::play::<_>(&self.play_ring, &self.deafen_handle)
     }
 }
 
