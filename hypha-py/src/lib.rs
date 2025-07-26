@@ -1,11 +1,13 @@
 use {
     ::hypha_core::{
         CloseHandle as RsCloseHandle,
-        Connection as RsConnection,
+        DataStream as RsDataStream,
         Instance as RsInstance,
-        Secret as RsSecret,
+        Peer as RsPeer,
+        PublicId as RsPublicId,
+        SecretId as RsSecretId,
+        ToggleHandle as RsToggleHandle,
     },
-    ::iroh::NodeId as RsNodeId,
     ::pyo3::{
         Bound,
         PyErr,
@@ -45,20 +47,25 @@ use {
         thread::sleep,
         time::Duration,
     },
-    ::tokio::task::{
-        JoinHandle,
-        spawn_blocking,
+    ::tokio::{
+        sync::Mutex,
+        task::{
+            JoinHandle,
+            spawn_blocking,
+        },
     },
     ::tracing::error,
 };
 
 #[pymodule]
 fn hypha_py(module: &Bound<PyModule>) -> PyResult<()> {
-    module.add_class::<Secret>()?;
-    module.add_class::<NodeId>()?;
+    module.add_class::<SecretId>()?;
+    module.add_class::<PublicId>()?;
     module.add_class::<Instance>()?;
-    module.add_class::<Connection>()?;
+    module.add_class::<Peer>()?;
+    module.add_class::<DataStream>()?;
     module.add_class::<AudioStream>()?;
+    module.add_class::<ToggleHandle>()?;
     module.add_class::<CloseHandle>()?;
     Result::Ok(())
 }
@@ -66,36 +73,36 @@ fn hypha_py(module: &Bound<PyModule>) -> PyResult<()> {
 #[gen_stub_pyclass]
 #[pyclass(frozen, str = "{0}")]
 #[derive(Clone, Debug)]
-struct Secret(RsSecret);
+struct SecretId(RsSecretId);
 
 #[gen_stub_pymethods]
 #[pymethods]
-impl Secret {
+impl SecretId {
     #[new]
     #[pyo3(signature = (s = Option::None))]
     fn new(s: Option<&str>) -> Result<Self, RuntimeError> {
         Result::Ok(Self(match s {
-            Option::Some(s) => RsSecret::from_str(s).into_error()?,
-            Option::None => RsSecret::generate(),
+            Option::Some(s) => RsSecretId::from_str(s).into_error()?,
+            Option::None => RsSecretId::generate(),
         }))
     }
 
-    fn node_id(&self) -> NodeId {
-        NodeId(self.0.node_id())
+    fn public(&self) -> PublicId {
+        PublicId(self.0.public())
     }
 }
 
 #[gen_stub_pyclass]
 #[pyclass(frozen, str = "{0}")]
 #[derive(Clone, Hash, Debug)]
-struct NodeId(RsNodeId);
+struct PublicId(RsPublicId);
 
 #[gen_stub_pymethods]
 #[pymethods]
-impl NodeId {
+impl PublicId {
     #[new]
     fn new(s: &str) -> Result<Self, RuntimeError> {
-        Result::Ok(NodeId(RsNodeId::from_str(s).into_error()?))
+        Result::Ok(Self(RsPublicId::from_str(s).into_error()?))
     }
 }
 
@@ -108,41 +115,34 @@ struct Instance(RsInstance);
 #[pymethods]
 impl Instance {
     #[staticmethod]
-    fn bind(py: Python, secret: Option<Secret>) -> PyResult<Bound<PyAny>> {
+    fn bind(py: Python, secret: Option<SecretId>) -> PyResult<Bound<PyAny>> {
         future_into_py(py, async {
             let rs = RsInstance::bind::<RuntimeError>(secret.map(|secret| secret.0)).await?;
             Result::Ok(Self(rs))
         })
     }
 
-    fn secret(&self) -> Secret {
-        Secret(RsSecret::new(self.0.endpoint().secret_key().clone()))
+    fn secret(&self) -> SecretId {
+        SecretId(RsSecretId::new(self.0.endpoint().secret_key().clone()))
     }
 
     fn accept<'py>(this: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let this = this.unbind();
 
         future_into_py(py, async move {
-            Result::Ok(Connection(
-                this.get().0.accept::<RuntimeError, RuntimeError>().await?,
-            ))
+            Result::Ok(Peer(this.get().0.accept::<RuntimeError>().await?))
         })
     }
 
     fn connect<'py>(
         this: Bound<'py, Self>,
         py: Python<'py>,
-        node_id: NodeId,
+        id: PublicId,
     ) -> PyResult<Bound<'py, PyAny>> {
         let this = this.unbind();
 
         future_into_py(py, async move {
-            Result::Ok(Connection(
-                this.get()
-                    .0
-                    .connect::<RuntimeError, RuntimeError>(node_id.0)
-                    .await?,
-            ))
+            Result::Ok(Peer(this.get().0.connect::<RuntimeError>(id.0).await?))
         })
     }
 
@@ -159,16 +159,42 @@ impl Instance {
 #[gen_stub_pyclass]
 #[pyclass(frozen)]
 #[derive(Debug)]
-struct Connection(RsConnection<RuntimeError>);
+struct Peer(RsPeer);
 
 #[gen_stub_pymethods]
 #[pymethods]
-impl Connection {
-    fn record(this: Bound<Self>) -> AudioStream {
+impl Peer {
+    fn accept_stream<'py>(this: Bound<Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let this = this.unbind();
+
+        future_into_py(py, async move {
+            Result::Ok(DataStream::new(
+                this.get()
+                    .0
+                    .accept_stream::<RuntimeError, RuntimeError>()
+                    .await?,
+            ))
+        })
+    }
+
+    fn open_stream<'py>(this: Bound<Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let this = this.unbind();
+
+        future_into_py(py, async move {
+            Result::Ok(DataStream::new(
+                this.get()
+                    .0
+                    .open_stream::<RuntimeError, RuntimeError>()
+                    .await?,
+            ))
+        })
+    }
+
+    fn record_stream(this: Bound<Self>) -> AudioStream {
         let this = this.unbind();
 
         AudioStream(spawn_blocking(move || {
-            let _stream = match this.get().0.record::<RuntimeError>() {
+            let _stream = match this.get().0.record_stream::<RuntimeError>() {
                 Result::Ok(stream) => Option::Some(stream),
                 Result::Err(error) => {
                     error!(error = &error as &dyn Error);
@@ -182,11 +208,11 @@ impl Connection {
         }))
     }
 
-    fn play(this: Bound<Self>) -> AudioStream {
+    fn play_stream(this: Bound<Self>) -> AudioStream {
         let this = this.unbind();
 
         AudioStream(spawn_blocking(move || {
-            let _stream = match this.get().0.play::<RuntimeError>() {
+            let _stream = match this.get().0.play_stream::<RuntimeError>() {
                 Result::Ok(stream) => Option::Some(stream),
                 Result::Err(error) => {
                     error!(error = &error as &dyn Error);
@@ -198,6 +224,14 @@ impl Connection {
                 sleep(Duration::from_secs(1024));
             }
         }))
+    }
+
+    fn mute_handle(&self) -> ToggleHandle {
+        ToggleHandle(self.0.mute_handle().clone())
+    }
+
+    fn deafen_handle(&self) -> ToggleHandle {
+        ToggleHandle(self.0.deafen_handle().clone())
     }
 
     fn close_handle(&self) -> CloseHandle {
@@ -207,7 +241,50 @@ impl Connection {
 
 #[gen_stub_pyclass]
 #[pyclass(frozen)]
+struct DataStream(Arc<Mutex<Option<RsDataStream<RuntimeError>>>>);
+
+impl DataStream {
+    fn new(stream: RsDataStream<RuntimeError>) -> Self {
+        Self(Arc::new(Mutex::new(Option::Some(stream))))
+    }
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl DataStream {
+    fn join<'py>(this: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let this = this.unbind();
+
+        future_into_py(py, async move {
+            if let Option::Some(stream) = this.get().0.lock().await.take() {
+                stream.join::<RuntimeError>().await?;
+            }
+
+            Result::Ok(())
+        })
+    }
+}
+
+#[gen_stub_pyclass]
+#[pyclass(frozen)]
 struct AudioStream(#[allow(dead_code)] JoinHandle<()>);
+
+#[gen_stub_pyclass]
+#[pyclass(frozen)]
+#[derive(Debug)]
+struct ToggleHandle(Arc<RsToggleHandle>);
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl ToggleHandle {
+    fn is_on(&self) -> bool {
+        self.0.is_on()
+    }
+
+    fn toggle(&self) {
+        self.0.toggle();
+    }
+}
 
 #[gen_stub_pyclass]
 #[pyclass(frozen)]
