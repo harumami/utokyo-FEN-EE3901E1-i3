@@ -29,7 +29,6 @@ use {
     },
     ::iroh::{
         KeyParsingError,
-        NodeId,
         PublicKey,
         SecretKey,
         endpoint::{

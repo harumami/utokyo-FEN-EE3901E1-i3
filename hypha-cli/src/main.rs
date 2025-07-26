@@ -139,7 +139,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
         })
     })?;
 
-    let _rec_stream = match peer.record_stream() {
+    let _rec_stream = match peer.record_stream::<BoxedError>() {
         Result::Ok(recorder) => Option::Some(recorder),
         Result::Err(error) => {
             info!(error = &error as &dyn Error);
@@ -147,7 +147,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
         },
     };
 
-    let _play_stream = match peer.play_stream() {
+    let _play_stream = match peer.play_stream::<BoxedError>() {
         Result::Ok(player) => Option::Some(player),
         Result::Err(error) => {
             info!(error = &error as &dyn Error);
