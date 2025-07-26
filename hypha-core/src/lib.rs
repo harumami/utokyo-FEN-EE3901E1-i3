@@ -188,7 +188,7 @@ impl Instance {
         recv_stream.read_exact(&mut buffer).await.into_error()?;
 
         if buffer != [0] {
-            fail!(AnyError("connection is broken".into()));
+            fail!(AnyError("connection is broken"));
         }
 
         let connection = Connection::new(send_stream, recv_stream)?;
@@ -489,7 +489,7 @@ impl AudioStream {
             SampleFormat::F64 => {
                 Self::build_input::<f64, _>(&device, &config.config(), producer, mute_handle)
             },
-            format => fail!(AnyError(format!("unknown format: {format}").into())),
+            format => fail!(UnknownFormatError(format)),
         }?;
 
         stream.play().into_error()?;
@@ -512,7 +512,7 @@ impl AudioStream {
         let stereo = match config.channels {
             1 => false,
             2 => true,
-            _ => fail!(AnyError("no input config which is stereo or mono".into())),
+            _ => fail!(AnyError("no input config which is stereo or mono")),
         };
 
         debug!(stereo, "input is stereo or not");
@@ -625,7 +625,7 @@ impl AudioStream {
             SampleFormat::F64 => {
                 Self::build_output::<f64, _>(&device, &config.config(), consumer, deafen_handle)
             },
-            format => fail!(AnyError(format!("unknown format: {format}").into())),
+            format => fail!(UnknownFormatError(format)),
         }?;
 
         stream.play().into_error()?;
@@ -649,7 +649,7 @@ impl AudioStream {
         let stereo = match channels {
             1 => false,
             2 => true,
-            _ => fail!(AnyError("no output config which is stereo or mono".into())),
+            _ => fail!(AnyError("no output config which is stereo or mono")),
         };
 
         debug!(stereo, "output is stereo or not");
@@ -783,7 +783,7 @@ impl<T> Deref for ThreadBound<T> {
 }
 
 #[derive(Debug)]
-struct AnyError(Box<dyn Error + Send + Sync + 'static>);
+struct AnyError(&'static str);
 
 impl Display for AnyError {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
@@ -791,8 +791,15 @@ impl Display for AnyError {
     }
 }
 
-impl Error for AnyError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        self.0.source()
+impl Error for AnyError {}
+
+#[derive(Debug)]
+struct UnknownFormatError(SampleFormat);
+
+impl Display for UnknownFormatError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "unknown format: {}", self.0)
     }
 }
+
+impl Error for UnknownFormatError {}
