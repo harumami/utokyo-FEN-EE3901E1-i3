@@ -38,7 +38,6 @@ use {
         Encoder,
     },
     ::rancor::{
-        BoxedError,
         OptionExt as _,
         ResultExt as _,
         Source,
@@ -57,7 +56,6 @@ use {
         },
         iter::from_fn,
         marker::PhantomData,
-        net::SocketAddr,
         ops::Deref,
         str::FromStr,
         sync::{
@@ -67,7 +65,6 @@ use {
                 Ordering,
             },
         },
-        time::Duration,
     },
     ::tokio::{
         select,
@@ -76,7 +73,6 @@ use {
             JoinHandle,
             spawn,
         },
-        time::sleep,
     },
     ::tracing::{
         debug,
@@ -157,7 +153,6 @@ impl Instance {
             .secret_key(secret.key().clone())
             .alpns(vec![Self::ALPN.to_vec()])
             .discovery_n0()
-            .discovery_local_network()
             .bind()
             .await
             .into_error()?;
@@ -197,44 +192,9 @@ impl Instance {
         Result::Ok(connection)
     }
 
-    pub async fn connect<E0: Source, E1: Source>(
-        &self,
-        address: Address,
-    ) -> Result<Connection<E0>, E1> {
-        debug!(%address, "connect to");
-
-        let node_id = match address {
-            Address::Id(id) => id,
-            Address::Direct(direct) => 'label: {
-                debug!(%direct, "search remote direct");
-
-                for _ in 0..10 {
-                    for remote in self.endpoint.remote_info_iter() {
-                        let id = remote.node_id;
-                        debug!(%id, "find remote");
-
-                        for addr in &remote.addrs {
-                            debug!(remote_addr = %addr.addr, "find remote address");
-
-                            if addr.addr == direct {
-                                break 'label id;
-                            }
-                        }
-                    }
-
-                    sleep(Duration::from_secs(1)).await;
-                }
-
-                fail!(AnyError("unknown address".into()));
-            },
-        };
-
-        let connection = self
-            .endpoint
-            .connect(node_id, Self::ALPN)
-            .await
-            .into_error()?;
-
+    pub async fn connect<E0: Source, E1: Source>(&self, id: NodeId) -> Result<Connection<E0>, E1> {
+        debug!(%id, "connect to");
+        let connection = self.endpoint.connect(id, Self::ALPN).await.into_error()?;
         debug!("open bi stream");
         let (mut send_stream, recv_stream) = connection.open_bi().await.into_error()?;
         send_stream.write_all(&[0]).await.into_error()?;
@@ -244,38 +204,6 @@ impl Instance {
 
     pub async fn close(&self) {
         self.endpoint.close().await;
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Address {
-    Id(NodeId),
-    Direct(SocketAddr),
-}
-
-impl Display for Address {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Self::Id(id) => Display::fmt(&id, f),
-            Self::Direct(direct) => Display::fmt(&direct, f),
-        }
-    }
-}
-
-impl FromStr for Address {
-    type Err = BoxedError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match FromStr::from_str(s) {
-            Result::Ok(id) => Result::Ok(Self::Id(id)),
-            Result::Err(error0) => match FromStr::from_str(s) {
-                Result::Ok(direct) => Result::Ok(Self::Direct(direct)),
-                Result::Err(error1) => Result::Err(AnyError("invalid address".into()))
-                    .into_error()
-                    .trace(error0)
-                    .trace(error1),
-            },
-        }
     }
 }
 

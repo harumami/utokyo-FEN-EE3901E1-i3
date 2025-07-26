@@ -4,10 +4,10 @@ use {
         Subcommand,
     },
     ::hypha_core::{
-        Address,
         Instance,
         Secret,
     },
+    ::iroh::NodeId,
     ::rancor::{
         BoxedError,
         ResultExt as _,
@@ -46,7 +46,6 @@ use {
         registry::Registry,
         util::SubscriberInitExt as _,
     },
-    tracing::debug,
 };
 
 fn main() -> ExitCode {
@@ -113,47 +112,13 @@ fn run(command: Command) -> Result<(), BoxedError> {
             secret,
         } => (secret, Method::Host),
         Command::Join {
-            address,
-        } => (Option::None, Method::Join(address)),
+            id,
+        } => (Option::None, Method::Join(id)),
     };
 
     let runtime = Runtime::new().into_error()?;
     let instance = runtime.block_on(Instance::bind(secret))?;
     println!("Your ID: {}", instance.endpoint().secret_key().public());
-    let mut directs_watch = instance.endpoint().direct_addresses();
-
-    runtime.spawn(async move {
-        debug!("search directs");
-
-        let directs = match directs_watch.get() {
-            Result::Ok(directs) => match directs {
-                Option::Some(directs) => directs,
-                Option::None => loop {
-                    match directs_watch.updated().await {
-                        Result::Ok(directs) => match directs {
-                            Option::Some(directs) => break directs,
-                            Option::None => {
-                                debug!("directs are not found");
-                                continue;
-                            },
-                        },
-                        Result::Err(error) => {
-                            error!(error = &error as &dyn Error);
-                            return;
-                        },
-                    }
-                },
-            },
-            Result::Err(error) => {
-                error!(error = &error as &dyn Error);
-                return;
-            },
-        };
-
-        for direct in directs {
-            println!("Your Direct: {}", direct.addr);
-        }
-    });
 
     let connection = runtime.block_on(async {
         match method {
@@ -240,11 +205,11 @@ enum Command {
         secret: Option<Secret>,
     },
     Join {
-        address: Address,
+        id: NodeId,
     },
 }
 
 enum Method {
     Host,
-    Join(Address),
+    Join(NodeId),
 }

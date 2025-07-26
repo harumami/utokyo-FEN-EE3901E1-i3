@@ -1,6 +1,5 @@
 use {
     ::hypha_core::{
-        Address,
         CloseHandle as RsCloseHandle,
         Connection as RsConnection,
         Instance as RsInstance,
@@ -141,7 +140,7 @@ impl Instance {
             Result::Ok(Connection(
                 this.get()
                     .0
-                    .connect::<RuntimeError, RuntimeError>(Address::Id(node_id.0))
+                    .connect::<RuntimeError, RuntimeError>(node_id.0)
                     .await?,
             ))
         })
