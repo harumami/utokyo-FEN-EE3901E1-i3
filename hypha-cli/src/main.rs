@@ -144,6 +144,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
     };
 
     let mute_handle = connection.mute_handle().clone();
+    let deafen_handle = connection.deafen_handle().clone();
     let close_handle = connection.close_handle().clone();
 
     runtime.spawn(async move {
@@ -164,10 +165,19 @@ fn run(command: Command) -> Result<(), BoxedError> {
                 "M" => {
                     mute_handle.toggle();
 
-                    if mute_handle.is_muted() {
+                    if mute_handle.is_on() {
                         println!("[ MUTED ]");
                     } else {
                         println!("[ UNMUTED ]");
+                    }
+                },
+                "D" => {
+                    deafen_handle.toggle();
+
+                    if deafen_handle.is_on() {
+                        println!("[ DEAFENED ]");
+                    } else {
+                        println!("[ UNDEAFENED ]");
                     }
                 },
                 "Q" => {
@@ -181,7 +191,7 @@ fn run(command: Command) -> Result<(), BoxedError> {
         }
     });
 
-    println!("Let's talk! ('M' to mute, 'Q' to exit)");
+    println!("Let's talk! ('M' to mute, 'D' to deafen, 'Q' to exit)");
     runtime.block_on(connection.join())?;
     println!("Bye.");
     runtime.block_on(instance.close());
