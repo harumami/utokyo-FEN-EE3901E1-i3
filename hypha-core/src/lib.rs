@@ -139,6 +139,7 @@ impl Instance {
     const MAX_PACKET_SIZE: usize = 4000;
     const RESAMPLE_QUALITY: u32 = 7;
     const RING_SIZE: usize = Self::SAMPLE_RATE as usize * 100 / 1000;
+    const RING_THRESHOLD: usize = Self::RING_SIZE * 8 / 10;
     const SAMPLE_RATE: u32 = 48000;
 
     pub async fn bind<E: Source>(secret: Option<Secret>) -> Result<Self, E> {
@@ -317,6 +318,10 @@ impl<E0: Source> Connection<E0> {
                         decoder.input().resize(u32::from_le_bytes(len) as _, 0);
                         recv_stream.read_exact(decoder.input()).await.into_error()?;
                         decoder.decode(Instance::MAX_FRAME_SIZE).into_error()?;
+
+                        if play_producer.len() > Instance::RING_THRESHOLD {
+                            continue;
+                        }
 
                         if let Result::Err(samples) = play_producer
                             .extend(decoder.output().chunks(2).map(|frame| [frame[0], frame[1]]))
@@ -542,7 +547,7 @@ impl AudioStream {
                     };
 
                     if let Result::Err(samples) = producer.extend(frames) {
-                        warn!("drop {} samples from input", samples.count());
+                        warn!("drop {} samples from device", samples.count());
                     }
                 },
                 |error| error!(error = &error as &dyn Error),
